@@ -1,3 +1,4 @@
+max_memory_mb: 512
 levels:
   raw: true
   schema: true

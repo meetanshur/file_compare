@@ -44,6 +44,7 @@ class ComparisonConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    max_memory_mb: int = Field(default=512, gt=0)
     levels: ComparisonLevels = Field(default_factory=ComparisonLevels)
     record_key: list[str] = Field(default_factory=list)
     ignore_fields: list[str] = Field(default_factory=list)

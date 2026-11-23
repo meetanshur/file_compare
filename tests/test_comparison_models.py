@@ -53,6 +53,8 @@ def test_config_rejects_negative_tolerance_and_unknown_fields() -> None:
     with pytest.raises(ValidationError):
         ComparisonConfig(numeric_tolerance=Decimal("-0.01"))
     with pytest.raises(ValidationError):
+        ComparisonConfig(max_memory_mb=0)
+    with pytest.raises(ValidationError):
         ComparisonConfig(unexpected_option=True)
 
 

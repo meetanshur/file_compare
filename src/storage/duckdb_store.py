@@ -76,7 +76,7 @@ class DuckDBStore:
         database_path: str | Path,
         *,
         job_id: UUID | None = None,
-        memory_limit: str = "512MB",
+        max_memory_mb: int = 512,
         temp_directory: str | Path | None = None,
         max_total_differences: int = 1_000_000,
         batch_size: int = 1_000,
@@ -85,6 +85,8 @@ class DuckDBStore:
             raise ValueError("max_total_differences must be zero or greater")
         if batch_size < 1:
             raise ValueError("batch_size must be greater than zero")
+        if max_memory_mb < 1:
+            raise ValueError("max_memory_mb must be greater than zero")
 
         self.database_path = Path(database_path)
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -95,6 +97,7 @@ class DuckDBStore:
         )
         self.temp_directory.mkdir(parents=True, exist_ok=True)
         self.max_total_differences = max_total_differences
+        self.max_memory_mb = max_memory_mb
         self.batch_size = batch_size
         self._lock = threading.RLock()
         self._connection: duckdb.DuckDBPyConnection | None = None
@@ -103,7 +106,7 @@ class DuckDBStore:
             self._connection = duckdb.connect(
                 str(self.database_path),
                 config={
-                    "memory_limit": memory_limit,
+                    "memory_limit": f"{max_memory_mb}MiB",
                     "temp_directory": str(self.temp_directory),
                 },
             )
