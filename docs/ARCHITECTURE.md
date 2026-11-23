@@ -39,10 +39,12 @@ process-memory limit. Tests and benchmarks must measure actual peak memory.
 Temporary database files must be kept separate from source files, scoped to a
 job, and cleaned up according to job-retention policy. The database must be
 configured with a memory limit within the job budget and a temporary directory
-with enough free disk space. Since records and findings are persisted in
-DuckDB, large comparisons can require substantial free disk space. If disk
-space is low or a database write fails, fail the job with a clear error; do not
-silently fall back to storing all records or findings in memory.
+with enough free disk space. The job runner assigns DuckDB about 50% of
+`max_memory_mb`, leaving the remainder for parsers and buffers. Since records
+and findings are persisted in DuckDB, large comparisons can require substantial
+free disk space. If disk space is low or a database write fails, fail the job
+with a clear error; do not silently fall back to storing all records or
+findings in memory.
 
 ## Memory rules
 
