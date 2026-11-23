@@ -115,3 +115,21 @@ After optimizing ingestion, the 100 MB-per-file local baseline measured
 memory respectively, under a 512 MiB budget. These are machine-specific
 observations, not performance guarantees; JSON benchmark reports record the
 full runtime and settings.
+
+## Raw comparison
+
+`RawComparator` consumes each source in bounded chunks and yields differences
+instead of accumulating them. Every byte mismatch is reported with its
+zero-based byte offset, byte value, and one-based line and column for each
+source. It also compares incrementally decoded characters and reports the
+character offset, value, line, and column. Inserted or trailing content has a
+missing position/value on the shorter side; a shifted suffix is reported as
+position-by-position mismatches rather than an edit-alignment diff.
+
+Encoding overrides may be supplied independently for each source. Otherwise
+the shared bounded detector selects an encoding; binary or undetected input
+uses Latin-1 as a reversible byte-to-character fallback. The byte comparison
+always remains authoritative for exact identity, including BOM and encoding
+differences. Character comparison does not normalize Unicode, whitespace,
+case, or line endings. Findings are streamed, so callers should persist or
+consume them incrementally rather than collecting unbounded results.
