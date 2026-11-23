@@ -63,9 +63,13 @@ class RawComparisonResult:
         *,
         identical: bool = False,
         max_total_differences: int = 0,
+        checksums_a: dict[str, str] | None = None,
+        checksums_b: dict[str, str] | None = None,
         close_resources: Callable[[], None] | None = None,
     ) -> None:
         self.is_identical = identical
+        self.checksums_a = checksums_a or {}
+        self.checksums_b = checksums_b or {}
         self.max_total_differences = max_total_differences
         self.difference_count = 0
         self.truncated = False
@@ -138,6 +142,7 @@ class _PreparedSource:
     stream: BinaryIO
     size: int
     sha256: bytes
+    md5: bytes
     sample: bytes
     encoding: str
 
@@ -253,11 +258,15 @@ class RawComparator:
                 cancellation_check,
             )
             if prepared_a.size == prepared_b.size and prepared_a.sha256 == prepared_b.sha256:
+                checksums_a = _checksum_values(prepared_a)
+                checksums_b = _checksum_values(prepared_b)
                 prepared_a.close()
                 prepared_b.close()
                 return RawComparisonResult(
                     identical=True,
                     max_total_differences=self.max_total_differences,
+                    checksums_a=checksums_a,
+                    checksums_b=checksums_b,
                 )
 
             differences = self._iter_differences(
@@ -268,6 +277,8 @@ class RawComparator:
             return RawComparisonResult(
                 differences,
                 max_total_differences=self.max_total_differences,
+                checksums_a=_checksum_values(prepared_a),
+                checksums_b=_checksum_values(prepared_b),
                 close_resources=lambda: _close_sources(prepared_a, prepared_b),
             )
         except Exception:
@@ -396,6 +407,7 @@ def _prepare_source(
 ) -> _PreparedSource:
     staged = tempfile.TemporaryFile(mode="w+b")
     digest = hashlib.sha256()
+    md5_digest = hashlib.md5(usedforsecurity=False)
     size = 0
     sample = bytearray()
     try:
@@ -406,12 +418,20 @@ def _prepare_source(
                 break
             staged.write(chunk)
             digest.update(chunk)
+            md5_digest.update(chunk)
             size += len(chunk)
             if len(sample) < sample_size_bytes:
                 sample.extend(chunk[: sample_size_bytes - len(sample)])
         encoding = _choose_encoding(encoding_override, bytes(sample), filename)
         staged.seek(0)
-        return _PreparedSource(staged, size, digest.digest(), bytes(sample), encoding)
+        return _PreparedSource(
+            staged,
+            size,
+            digest.digest(),
+            md5_digest.digest(),
+            bytes(sample),
+            encoding,
+        )
     except Exception:
         staged.close()
         raise
@@ -644,3 +664,10 @@ def _check_cancelled(cancellation_check: Callable[[], None] | None) -> None:
 def _close_sources(source_a: _PreparedSource, source_b: _PreparedSource) -> None:
     source_a.close()
     source_b.close()
+
+
+def _checksum_values(source: _PreparedSource) -> dict[str, str]:
+    return {
+        "md5": source.md5.hex(),
+        "sha256": source.sha256.hex(),
+    }

@@ -1,5 +1,6 @@
 """Deterministic file comparison engines."""
 
+from comparators.metadata import MetadataComparator, MetadataComparison, MetadataStatus
 from comparators.raw import (
     RawComparator,
     RawComparisonResult,
@@ -10,6 +11,9 @@ from comparators.raw import (
 from comparators.xml_schema import XMLSchemaComparator, XMLSchemaError, validate_xml_schema
 
 __all__ = [
+    "MetadataComparator",
+    "MetadataComparison",
+    "MetadataStatus",
     "RawComparator",
     "RawComparisonResult",
     "RawComparisonStatus",

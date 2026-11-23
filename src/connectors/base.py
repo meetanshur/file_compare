@@ -18,6 +18,8 @@ class SourceMetadata:
     name: str
     size_bytes: int | None = None
     modified_at: datetime | None = None
+    source_system: str | None = None
+    version: str | None = None
     content_type: str | None = None
     etag: str | None = None
     version_id: str | None = None

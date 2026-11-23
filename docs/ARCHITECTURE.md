@@ -159,6 +159,18 @@ network access, and DTD loading are disabled. The XSD itself is parsed with
 the same restrictions. Malformed or invalid XML raises `XMLSchemaError`
 including the source and schema names.
 
+## Metadata comparison
+
+`MetadataComparator` compares file size, timezone-normalized modification
+time, optional source-system and version identifiers, and MD5/SHA-256
+checksums. A missing value on either side has status `unavailable`, not
+`different`. Timestamps are compared as UTC instants. Checksums supplied by a
+connector are reused; hashes not already available are computed in bounded
+chunks. Pass the raw comparison result to reuse its SHA-256 digest and other
+computed checksums without rereading the file. Source-system and version
+values are optional `SourceMetadata` fields; connector-specific `version_id`
+is used when an explicit version is absent.
+
 On Windows with Python 3.13, a three-run comparison of the generated
 `xml_100MB_A.xml` and `xml_100MB_B.xml` fixtures (100,000,000 bytes each)
 verified both fixture hashes and the expected changed-record values in the
