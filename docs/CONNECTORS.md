@@ -18,6 +18,26 @@ with connector.open(r"C:\data\input.xml") as source:
         process(chunk)
 ```
 
+The S3 connector accepts `s3://bucket/key` URIs and streams the object body:
+
+```python
+from connectors.s3 import S3Connector
+
+connector = S3Connector()
+with connector.open("s3://my-bucket/path/input.xml") as source:
+    print(source.metadata.size_bytes, source.metadata.etag)
+    for chunk in source.read_chunks(4 * 1024 * 1024):
+        process(chunk)
+```
+
+S3 authentication uses boto3's standard credential provider chain (for example
+environment credentials, shared AWS config/credentials files, or an attached
+role). Do not put credentials in the URI or application config. An optional
+`region_name` can be provided to `S3Connector`; otherwise boto3 resolves the
+region using its normal configuration. The connector uses `HeadObject` for
+metadata and `GetObject` for the streaming body, and closes the body when the
+opened source exits its context.
+
 `SourceMetadata` contains a normalized URI, source type, name, optional byte
 size, timezone-aware modification time, content type, ETag/version identifiers,
 and optional checksum values. Values a connector cannot provide remain unset;
