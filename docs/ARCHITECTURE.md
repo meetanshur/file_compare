@@ -23,8 +23,10 @@ process-memory limit. Tests and benchmarks must measure actual peak memory.
 
 1. Connectors provide seekable or sequential byte streams and metadata. They
    must not download a remote object into a Python `bytes` value.
-2. Detection and hashing read bounded blocks. Raw comparison can stop early
-   when file sizes and SHA-256 digests match.
+2. Format, encoding, and line-ending detection uses a bounded source sample;
+   content signatures take precedence over filename extensions. Raw comparison
+   and hashing read bounded blocks, and raw comparison can stop early when file
+   sizes and SHA-256 digests match.
 3. Parsers emit records or structural events incrementally. They must not
    build a complete document tree, list of rows, or dictionary of all records.
 4. Record data and complete findings are written to job-scoped DuckDB tables.
@@ -53,6 +55,10 @@ findings in memory.
 - Keep decoding state across chunk boundaries so split multibyte characters
   are handled correctly. Raw byte comparison must remain independent of text
   decoding.
+- Format detection reads no more than its configured sample (64 KiB by
+  default). It reports the evidence source, recognized BOM or detected text
+  encoding, and line-ending counts observed in that sample; those counts are
+  not presented as whole-file totals.
 - For large XML files, use `lxml.etree.iterparse` (or SAX); never build a full
   DOM tree. After handling each element, clear it and remove its previous
   siblings so processed XML does not accumulate in memory. Tabular parsers

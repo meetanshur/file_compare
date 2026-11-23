@@ -11,6 +11,7 @@ dependencies = [
     "azure-identity>=1.17",
     "azure-storage-blob>=12.20",
     "boto3>=1.34",
+    "charset-normalizer>=3.3",
     "duckdb>=1.2",
     "google-cloud-storage>=2.18",
     "lxml>=5.0",
