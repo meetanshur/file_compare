@@ -90,3 +90,12 @@ resident memory, elapsed time, bytes or rows processed, and comparison
 correctness, including known injected differences. Results are evaluated
 against the configured job budget and hardware constraints; benchmark numbers
 must state the machine and settings used.
+
+The initial large-file benchmark measures streaming parsing and DuckDB record
+ingestion, including hashes, exact sizes, and persisted record counts. It does
+not yet measure comparison correctness; rerun the benchmark with the record
+comparison joins and expected-difference checks once those are implemented.
+The first 100 MB-per-file local baseline measured about 0.98 MiB/s and 243–249
+MiB peak process memory for CSV/XML ingestion with a 512 MiB job budget. These
+are machine-specific observations, not performance guarantees; the JSON
+benchmark reports record the full runtime and settings.
