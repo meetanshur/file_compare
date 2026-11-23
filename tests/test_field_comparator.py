@@ -107,6 +107,11 @@ def test_field_comparison_reports_values_and_json_original_types(tmp_path) -> No
     )
     try:
         findings = list(store.iter_differences())
+        hashes = (
+            store._require_connection()
+            .execute("SELECT row_hash FROM field_comparison_records ORDER BY side")
+            .fetchall()
+        )
     finally:
         store.close()
 
@@ -121,6 +126,75 @@ def test_field_comparison_reports_values_and_json_original_types(tmp_path) -> No
         "data_type": "number",
         "source_type": "json",
     }
+    assert hashes[0][0] != hashes[1][0]
+    assert len(hashes[0][0]) == 64
+
+
+def test_row_hash_encodes_unambiguous_field_boundaries(tmp_path) -> None:
+    store = DuckDBStore(tmp_path / "row-hash-boundaries.duckdb")
+    try:
+        FieldComparator().compare(
+            store,
+            [{"id": "1", "first": "ab", "second": "c"}],
+            [{"id": "1", "first": "a", "second": "bc"}],
+            config=ComparisonConfig(record_key=["id"]),
+        )
+        hashes = (
+            store._require_connection()
+            .execute("SELECT row_hash FROM field_comparison_records ORDER BY side")
+            .fetchall()
+        )
+    finally:
+        store.close()
+
+    assert hashes[0][0] != hashes[1][0]
+    assert all(len(row_hash) == 64 for (row_hash,) in hashes)
+
+
+def test_row_hash_includes_field_order(tmp_path) -> None:
+    store = DuckDBStore(tmp_path / "row-hash-order.duckdb")
+    try:
+        FieldComparator().compare(
+            store,
+            [{"id": "1", "first": "a", "second": "b"}],
+            [{"id": "1", "second": "b", "first": "a"}],
+            config=ComparisonConfig(record_key=["id"]),
+        )
+        hashes = (
+            store._require_connection()
+            .execute("SELECT row_hash FROM field_comparison_records ORDER BY side")
+            .fetchall()
+        )
+    finally:
+        store.close()
+
+    assert hashes[0][0] != hashes[1][0]
+
+
+@pytest.mark.parametrize(("null_equals_empty", "expected_findings"), [(False, 1), (True, 0)])
+def test_null_and_empty_hash_differ_but_config_controls_field_finding(
+    tmp_path, null_equals_empty, expected_findings
+) -> None:
+    rows_a = list(JSONParser(filename="a.json").parse(io.BytesIO(b'[{"id":"1","value":null}]')))
+    rows_b = list(JSONParser(filename="b.json").parse(io.BytesIO(b'[{"id":"1","value":""}]')))
+    store, _ = _compare(
+        tmp_path,
+        rows_a,
+        rows_b,
+        config=ComparisonConfig(record_key=["id"], null_equals_empty=null_equals_empty),
+    )
+    try:
+        hashes = (
+            store._require_connection()
+            .execute("SELECT row_hash FROM field_comparison_records ORDER BY side")
+            .fetchall()
+        )
+        findings = list(store.iter_differences())
+    finally:
+        store.close()
+
+    assert hashes[0][0] != hashes[1][0]
+    assert len(findings) == expected_findings
 
 
 def test_json_boolean_and_null_types_are_retained(tmp_path) -> None:
@@ -138,6 +212,11 @@ def test_json_boolean_and_null_types_are_retained(tmp_path) -> None:
     )
     try:
         findings = list(store.iter_differences())
+        hashes = (
+            store._require_connection()
+            .execute("SELECT row_hash FROM field_comparison_records ORDER BY side")
+            .fetchall()
+        )
     finally:
         store.close()
 
@@ -150,6 +229,7 @@ def test_json_boolean_and_null_types_are_retained(tmp_path) -> None:
     assert by_field["flag"].value_b["data_type"] == "string"
     assert by_field["empty"].value_a["data_type"] == "null"
     assert by_field["empty"].value_b["data_type"] == "string"
+    assert hashes[0][0] != hashes[1][0]
 
 
 def test_field_comparison_treats_delimited_values_as_text(tmp_path) -> None:
@@ -200,12 +280,18 @@ def test_field_comparison_reports_xlsx_cell_type(tmp_path) -> None:
     )
     try:
         findings = list(store.iter_differences())
+        hashes = (
+            store._require_connection()
+            .execute("SELECT row_hash FROM field_comparison_records ORDER BY side")
+            .fetchall()
+        )
     finally:
         store.close()
 
     amount = next(item for item in findings if "field=amount" in item.location)
     assert amount.value_a == {"value": "1.10", "data_type": "string", "source_type": "xlsx"}
     assert amount.value_b == {"value": "1.1", "data_type": "number", "source_type": "xlsx"}
+    assert hashes[0][0] != hashes[1][0]
 
 
 @pytest.mark.parametrize(
