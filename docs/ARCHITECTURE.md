@@ -118,18 +118,26 @@ full runtime and settings.
 
 ## Raw comparison
 
-`RawComparator` consumes each source in bounded chunks and yields differences
-instead of accumulating them. Every byte mismatch is reported with its
-zero-based byte offset, byte value, and one-based line and column for each
-source. It also compares incrementally decoded characters and reports the
-character offset, value, line, and column. Inserted or trailing content has a
-missing position/value on the shorter side; a shifted suffix is reported as
-position-by-position mismatches rather than an edit-alignment diff.
+`RawComparator` hashes and stages each source in bounded chunks, then yields
+edit differences instead of accumulating them. Matching SHA-256 digests and
+sizes short-circuit as identical. At a mismatch, the comparator looks ahead
+within a configurable bounded window and searches for the smallest insertion,
+deletion, or same-length replacement followed by a configurable matching byte
+sequence. If none is found, one replaced-region finding covers the window
+before comparison resumes. No sequence-diff library is used.
 
-Encoding overrides may be supplied independently for each source. Otherwise
-the shared bounded detector selects an encoding; binary or undetected input
-uses Latin-1 as a reversible byte-to-character fallback. The byte comparison
-always remains authoritative for exact identity, including BOM and encoding
-differences. Character comparison does not normalize Unicode, whitespace,
-case, or line endings. Findings are streamed, so callers should persist or
-consume them incrementally rather than collecting unbounded results.
+Each finding has byte offsets and lengths, decoded character offsets, one-based
+line/column positions, and bounded byte/text previews. Decoding uses an
+incremental decoder and can be overridden independently for each input; the
+byte finding remains authoritative for exact identity, including BOM and
+encoding differences. Character comparison does not normalize Unicode,
+whitespace, case, or line endings. `max_total_differences=0` is unlimited;
+otherwise `RawComparisonResult` stops when another finding exceeds the limit
+and exposes `truncated`, `status`, and a clear message. Pass a job's
+`raise_if_cancelled` callback as `cancellation_check`; it is checked while
+staging and throughout comparison and lookahead. Result iteration is lazy and
+one-shot, and the result should be closed or exhausted to release its
+temporary disk files.
+
+Findings are streamed, so callers should persist or consume them incrementally
+rather than collecting unbounded results.
