@@ -38,6 +38,26 @@ region using its normal configuration. The connector uses `HeadObject` for
 metadata and `GetObject` for the streaming body, and closes the body when the
 opened source exits its context.
 
+The HTTP connector accepts public or signed HTTP/HTTPS URLs. It requests a
+bounded byte range first; when the server responds with `206 Partial Content`,
+subsequent ranges are fetched as the source is read. If the server responds
+with `200 OK`, the connector keeps that response and streams it normally.
+Authentication query parameters are omitted from source metadata, and the
+connector does not log URLs or credentials:
+
+```python
+from connectors.http import HTTPConnector
+
+connector = HTTPConnector()
+with connector.open("https://example.com/data.csv") as source:
+    print(source.metadata.size_bytes, source.metadata.etag)
+    for chunk in source.read_chunks(4 * 1024 * 1024):
+        process(chunk)
+```
+
+Non-success HTTP statuses and transport failures raise `HTTPSourceError` with
+a status or error type, without including the URL.
+
 `SourceMetadata` contains a normalized URI, source type, name, optional byte
 size, timezone-aware modification time, content type, ETag/version identifiers,
 and optional checksum values. Values a connector cannot provide remain unset;
