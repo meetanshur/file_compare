@@ -77,6 +77,27 @@ and SSH client are closed when the opened source exits its context. Connection
 or file-access failures raise `SFTPSourceError` without exposing URI
 credentials.
 
+The Azure Blob connector accepts `azure://account/container/blob` URIs or
+standard Azure Blob HTTPS URLs. It uses Azure's `DefaultAzureCredential`
+chain (such as managed identity or a developer login) and streams downloader
+chunks rather than loading the full blob:
+
+```python
+from connectors.azure_blob import AzureBlobConnector
+
+connector = AzureBlobConnector()
+with connector.open("azure://myaccount/incoming/data.csv") as source:
+    print(source.metadata.size_bytes, source.metadata.etag)
+    for chunk in source.read_chunks(4 * 1024 * 1024):
+        process(chunk)
+```
+
+Provide access through Azure identity configuration; credentials and SAS
+tokens are not accepted in source URIs. The blob downloader and internally
+created client/credential are closed when the opened source exits its context.
+Azure SDK failures raise `AzureBlobSourceError` without including credentials
+or request URLs.
+
 `SourceMetadata` contains a normalized URI, source type, name, optional byte
 size, timezone-aware modification time, content type, ETag/version identifiers,
 and optional checksum values. Values a connector cannot provide remain unset;
