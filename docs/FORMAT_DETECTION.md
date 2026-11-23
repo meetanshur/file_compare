@@ -29,3 +29,28 @@ detection = detect_file(sample, "records.txt")
 print(detection.file_format)  # json: content structure overrides the extension
 print(detection.encoding, detection.line_ending, detection.line_ending_counts)
 ```
+
+## Streaming XML records
+
+Use `parsers.xml.iter_xml_records()` for XML inputs. By default it emits each
+direct child of the document root as one `XmlRecord`; pass `record_tag` to
+select elements by exact qualified name or local name. Each result contains an
+immutable element snapshot with ordered attributes and children, element text,
+and tail text. XML text and whitespace are retained as parsed; raw byte
+comparison remains responsible for byte-level encoding, BOM, and line-ending
+differences.
+
+The parser uses `lxml.etree.iterparse` with network access and entity
+resolution disabled. It clears each processed record and removes its previous
+siblings. Memory is bounded by the largest selected record, so a single
+enormous XML record can still require substantial memory. The caller owns and
+must close the source stream. Malformed input raises `XMLParseError` with the
+source name and line number.
+
+```python
+from parsers.xml import iter_xml_records
+
+with open("records.xml", "rb") as stream:
+    for record in iter_xml_records(stream, record_tag="record", source_name="records.xml"):
+        process(record.element)
+```

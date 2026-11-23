@@ -61,8 +61,10 @@ findings in memory.
   not presented as whole-file totals.
 - For large XML files, use `lxml.etree.iterparse` (or SAX); never build a full
   DOM tree. After handling each element, clear it and remove its previous
-  siblings so processed XML does not accumulate in memory. Tabular parsers
-  yield one bounded batch or record at a time.
+  siblings so processed XML does not accumulate in memory. XML record parsing
+  retains only the selected record being snapshotted, so memory can still grow
+  with the size of one individual record. Tabular parsers yield one bounded
+  batch or record at a time.
 - Do not use whole-file helpers such as `read()`, `read_bytes()`, or
   `read_text()` on comparison inputs. Do not retain all parsed records in
   Python collections.
