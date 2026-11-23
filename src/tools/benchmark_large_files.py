@@ -10,7 +10,6 @@ import os
 import platform
 import sys
 import time
-import xml.etree.ElementTree as ET
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,10 +17,11 @@ from typing import Any
 from uuid import uuid4
 
 import duckdb
+from lxml import etree
 
 from storage.duckdb_store import DuckDBStore, RecordSide
 
-DEFAULT_BATCH_SIZE = 1_000
+DEFAULT_BATCH_SIZE = 50_000
 DEFAULT_MAX_MEMORY_MB = 512
 
 
@@ -46,25 +46,44 @@ def _iter_csv_records(path: Path) -> Iterator[dict[str, str]]:
 
 def _iter_xml_records(path: Path) -> Iterator[dict[str, str]]:
     with path.open("rb") as stream:
-        stack: list[ET.Element] = []
-        for event, element in ET.iterparse(stream, events=("start", "end")):
-            if event == "start":
-                stack.append(element)
-                continue
+        for _, element in etree.iterparse(stream, events=("end",), tag="record"):
+            value = element.findtext("value")
+            padding = element.findtext("padding")
+            record_id = element.get("id")
+            if record_id is None or value is None or padding is None:
+                raise ValueError(f"{path.name} contains a malformed XML record")
+            record = {"id": record_id, "value": value, "padding": padding}
+            element.clear(keep_tail=True)
+            parent = element.getparent()
+            if parent is not None:
+                while element.getprevious() is not None:
+                    del parent[0]
+            yield record
 
-            if element.tag == "record":
-                value = element.findtext("value")
-                padding = element.findtext("padding")
-                record_id = element.get("id")
-                if record_id is None or value is None or padding is None:
-                    raise ValueError(f"{path.name} contains a malformed XML record")
-                record = {"id": record_id, "value": value, "padding": padding}
-                if len(stack) > 1:
-                    stack[-2].remove(element)
-                element.clear()
-                yield record
 
-            stack.pop()
+def _measure_parser(records: Iterator[dict[str, str]]) -> tuple[int, float]:
+    started = time.perf_counter()
+    count = sum(1 for _ in records)
+    return count, time.perf_counter() - started
+
+
+def _timed_records(
+    records: Iterator[dict[str, str]], timings: dict[str, float]
+) -> Iterator[dict[str, str]]:
+    iterator = iter(records)
+    while True:
+        started = time.perf_counter()
+        try:
+            record = next(iterator)
+        except StopIteration:
+            timings["parser_seconds"] = timings.get("parser_seconds", 0.0) + (
+                time.perf_counter() - started
+            )
+            return
+        timings["parser_seconds"] = timings.get("parser_seconds", 0.0) + (
+            time.perf_counter() - started
+        )
+        yield record
 
 
 def _peak_memory_bytes() -> int:
@@ -185,12 +204,29 @@ def run_benchmark(
             if actual_digest != expected_digest:
                 raise ValueError(f"SHA-256 mismatch for {fixture_path.name}")
 
+            parsed_count, parser_only_seconds = _measure_parser(parse_records(fixture_path))
+            if parsed_count != int(expected_count[label]):
+                raise ValueError(
+                    f"{fixture_path.name} parser produced {parsed_count} records; "
+                    f"manifest expects {expected_count[label]}"
+                )
+
             ingest_started = time.perf_counter()
-            record_count = store.insert_records(
-                side,
-                parse_records(fixture_path),
-                key_fields=("id",),
-            )
+            parser_timings = {"parser_seconds": 0.0}
+            if file_format == "csv":
+                record_count = store.insert_csv_file(side, fixture_path, key_fields=("id",))
+                parser_seconds = None
+                storage_seconds = None
+                ingest_method = "DuckDB native read_csv plus SQL insert"
+            else:
+                record_count = store.insert_records(
+                    side,
+                    _timed_records(parse_records(fixture_path), parser_timings),
+                    key_fields=("id",),
+                )
+                parser_seconds = parser_timings["parser_seconds"]
+                storage_seconds = max(0.0, time.perf_counter() - ingest_started - parser_seconds)
+                ingest_method = "lxml iterparse plus DuckDB Appender"
             ingest_seconds = time.perf_counter() - ingest_started
             if record_count != int(expected_count[label]):
                 raise ValueError(
@@ -206,7 +242,11 @@ def run_benchmark(
                     "records_ingested": record_count,
                     "expected_records": int(expected_count[label]),
                     "hash_seconds": hash_seconds,
+                    "parser_only_seconds": parser_only_seconds,
                     "ingest_seconds": ingest_seconds,
+                    "ingest_method": ingest_method,
+                    "parser_seconds_during_ingest": parser_seconds,
+                    "storage_seconds_estimate": storage_seconds,
                     "ingest_mib_per_second": actual_size / (1024**2) / ingest_seconds
                     if ingest_seconds
                     else None,
@@ -214,6 +254,9 @@ def run_benchmark(
                 }
             )
 
+        index_started = time.perf_counter()
+        store.create_record_key_index()
+        index_seconds = time.perf_counter() - index_started
         stored_counts = {
             "file_a": store.count_records(RecordSide.FILE_A),
             "file_b": store.count_records(RecordSide.FILE_B),
@@ -224,6 +267,7 @@ def run_benchmark(
     total_seconds = time.perf_counter() - total_started
     total_bytes = sum(item["size_bytes"] for item in measurements)
     total_rows = sum(item["records_ingested"] for item in measurements)
+    peak_memory_bytes = _peak_memory_bytes()
     return {
         "schema_version": 1,
         "benchmark_scope": "streaming parse and DuckDB record ingestion; no record diff joins",
@@ -244,10 +288,12 @@ def run_benchmark(
         },
         "database": str(database_path),
         "free_disk_bytes_before": free_disk_bytes_before,
+        "index_creation_seconds": index_seconds,
         "files": measurements,
         "validation": {
             "hashes_match_manifest": all(item["sha256_valid"] for item in measurements),
             "record_counts_match_manifest": True,
+            "peak_memory_within_budget": peak_memory_bytes <= max_memory_mb * 1024**2,
             "expected_difference_manifest_counts": {
                 kind: len(entries) for kind, entries in manifest["expected_differences"].items()
             },
@@ -259,7 +305,20 @@ def run_benchmark(
             "elapsed_seconds": total_seconds,
             "mib_per_second": total_bytes / (1024**2) / total_seconds if total_seconds else None,
             "rows_per_second": total_rows / total_seconds if total_seconds else None,
-            "peak_process_memory_bytes": _peak_memory_bytes(),
+            "peak_process_memory_bytes": peak_memory_bytes,
+            "hash_seconds": sum(item["hash_seconds"] for item in measurements),
+            "parser_only_seconds": sum(item["parser_only_seconds"] for item in measurements),
+            "csv_native_parse_and_insert_seconds": sum(
+                item["ingest_seconds"]
+                for item in measurements
+                if item["ingest_method"] == "DuckDB native read_csv plus SQL insert"
+            ),
+            "xml_parser_seconds_during_ingest": sum(
+                item["parser_seconds_during_ingest"] or 0 for item in measurements
+            ),
+            "xml_storage_seconds_estimate": sum(
+                item["storage_seconds_estimate"] or 0 for item in measurements
+            ),
         },
     }
 

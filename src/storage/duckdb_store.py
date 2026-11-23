@@ -79,7 +79,7 @@ class DuckDBStore:
         max_memory_mb: int = 512,
         temp_directory: str | Path | None = None,
         max_total_differences: int = 1_000_000,
-        batch_size: int = 1_000,
+        batch_size: int = 50_000,
     ) -> None:
         if max_total_differences < 0:
             raise ValueError("max_total_differences must be zero or greater")
@@ -148,8 +148,19 @@ class DuckDBStore:
                 record_id BIGINT PRIMARY KEY DEFAULT nextval('record_id_sequence'),
                 side VARCHAR NOT NULL CHECK (side IN ('A', 'B')),
                 record_key JSON,
+                record_key_text VARCHAR,
                 payload JSON NOT NULL
             )
+            """
+        )
+        connection.execute(
+            "ALTER TABLE comparison_records ADD COLUMN IF NOT EXISTS record_key_text VARCHAR"
+        )
+        connection.execute(
+            """
+            UPDATE comparison_records
+            SET record_key_text = CAST(record_key AS VARCHAR)
+            WHERE record_key IS NOT NULL AND record_key_text IS NULL
             """
         )
         connection.execute(
@@ -204,7 +215,7 @@ class DuckDBStore:
         if not isinstance(side, RecordSide):
             raise ValueError("side must be a RecordSide value")
         inserted = 0
-        batch: list[tuple[str, str | None, str]] = []
+        batch: list[tuple[str, str | None, str | None, str]] = []
 
         with self._lock:
             self._require_connection()
@@ -214,10 +225,12 @@ class DuckDBStore:
                     if missing_keys:
                         raise ValueError(f"Record is missing key fields: {', '.join(missing_keys)}")
                     key = [[field, record[field]] for field in key_fields] if key_fields else None
+                    key_json = None if key is None else _serialize_json(key)
                     batch.append(
                         (
                             side.value,
-                            None if key is None else _serialize_json(key),
+                            key_json,
+                            key_json,
                             _serialize_json(record),
                         )
                     )
@@ -235,21 +248,109 @@ class DuckDBStore:
                 ) from exc
         return inserted
 
-    def _insert_record_batch(self, batch: list[tuple[str, str | None, str]]) -> None:
+    def _insert_record_batch(self, batch: list[tuple[str, str | None, str | None, str]]) -> None:
         connection = self._require_connection()
         connection.execute("BEGIN TRANSACTION")
+        appender = connection.appender(
+            "comparison_records",
+            columns=["side", "record_key", "record_key_text", "payload"],
+        )
         try:
-            connection.executemany(
-                """
-                INSERT INTO comparison_records (side, record_key, payload)
-                VALUES (?, ?::JSON, ?::JSON)
-                """,
-                batch,
-            )
+            appender.append_rows(batch)
+            appender.flush()
             connection.execute("COMMIT")
-        except duckdb.Error:
+        except Exception:
             connection.execute("ROLLBACK")
             raise
+
+    def insert_csv_file(
+        self,
+        side: RecordSide,
+        csv_path: str | Path,
+        *,
+        key_fields: Sequence[str] = (),
+    ) -> int:
+        """Ingest a CSV file with DuckDB's native streaming CSV reader."""
+        if not isinstance(side, RecordSide):
+            raise ValueError("side must be a RecordSide value")
+        path = Path(csv_path).resolve()
+        if not path.is_file():
+            raise FileNotFoundError(path)
+
+        with self._lock:
+            connection = self._require_connection()
+            try:
+                describe = connection.execute(
+                    """
+                    DESCRIBE SELECT * FROM read_csv(
+                        ?, header = true, all_varchar = true, auto_detect = true
+                    )
+                    """,
+                    [str(path)],
+                )
+                columns = [str(row[0]) for row in describe.fetchall()]
+                if not columns:
+                    raise ValueError(f"{path.name} has no CSV columns")
+                missing_keys = [field for field in key_fields if field not in columns]
+                if missing_keys:
+                    raise ValueError(f"CSV is missing key fields: {', '.join(missing_keys)}")
+
+                def quote_identifier(identifier: str) -> str:
+                    return '"' + identifier.replace('"', '""') + '"'
+
+                def quote_literal(value: str) -> str:
+                    return "'" + value.replace("'", "''") + "'"
+
+                if key_fields:
+                    key_parts = ", ".join(
+                        f"json_array({quote_literal(field)}, "
+                        f"CAST({quote_identifier(field)} AS VARCHAR))"
+                        for field in key_fields
+                    )
+                    key_json = f"json_array({key_parts})"
+                else:
+                    key_json = "NULL::JSON"
+                payload_parts = ", ".join(
+                    f"{quote_identifier(field)} := {quote_identifier(field)}" for field in columns
+                )
+                payload_json = f"to_json(struct_pack({payload_parts}))"
+                force_not_null = "[" + ", ".join(quote_literal(column) for column in columns) + "]"
+                query = f"""
+                    INSERT INTO comparison_records
+                        (side, record_key, record_key_text, payload)
+                    SELECT ?::VARCHAR, {key_json}, CAST({key_json} AS VARCHAR), {payload_json}
+                    FROM read_csv(
+                        ?, header = true, all_varchar = true, auto_detect = true,
+                        force_not_null = {force_not_null}
+                    )
+                """
+                before_count = self.count_records(side)
+                connection.execute("BEGIN TRANSACTION")
+                try:
+                    connection.execute(query, [side.value, str(path)])
+                    connection.execute("COMMIT")
+                except Exception:
+                    connection.execute("ROLLBACK")
+                    raise
+                return self.count_records(side) - before_count
+            except (duckdb.Error, OSError) as exc:
+                raise StorageError(
+                    f"Could not ingest CSV file {path.name} with DuckDB; check its format, "
+                    "permissions, and available disk space."
+                ) from exc
+
+    def create_record_key_index(self) -> None:
+        """Create the record matching index after records have been loaded."""
+        with self._lock:
+            try:
+                self._require_connection().execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS comparison_records_key_idx
+                    ON comparison_records (side, record_key_text)
+                    """
+                )
+            except duckdb.Error as exc:
+                raise StorageError("Could not create the record-key index.") from exc
 
     def count_records(self, side: RecordSide | None = None) -> int:
         """Return the number of records stored, optionally for one input side."""

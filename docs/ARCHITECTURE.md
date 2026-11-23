@@ -95,7 +95,8 @@ The initial large-file benchmark measures streaming parsing and DuckDB record
 ingestion, including hashes, exact sizes, and persisted record counts. It does
 not yet measure comparison correctness; rerun the benchmark with the record
 comparison joins and expected-difference checks once those are implemented.
-The first 100 MB-per-file local baseline measured about 0.98 MiB/s and 243–249
-MiB peak process memory for CSV/XML ingestion with a 512 MiB job budget. These
-are machine-specific observations, not performance guarantees; the JSON
-benchmark reports record the full runtime and settings.
+After optimizing ingestion, the 100 MB-per-file local baseline measured
+48.04 MiB/s for CSV and 25.63 MiB/s for XML, at 334 MiB and 306 MiB peak process
+memory respectively, under a 512 MiB budget. These are machine-specific
+observations, not performance guarantees; JSON benchmark reports record the
+full runtime and settings.

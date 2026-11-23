@@ -20,15 +20,17 @@ def test_benchmark_streams_records_and_validates_manifest(tmp_path, file_format)
 
     report = run_benchmark(
         pair.manifest,
-        max_memory_mb=32,
+        max_memory_mb=512,
         batch_size=7,
     )
 
     assert report["benchmark_scope"].startswith("streaming parse and DuckDB record ingestion")
-    assert report["settings"]["max_memory_mb"] == 32
-    assert report["settings"]["duckdb_memory_mb"] == 16
+    assert report["settings"]["max_memory_mb"] == 512
+    assert report["settings"]["duckdb_memory_mb"] == 256
+    assert report["index_creation_seconds"] >= 0
     assert report["validation"]["hashes_match_manifest"] is True
     assert report["validation"]["record_counts_match_manifest"] is True
+    assert report["validation"]["peak_memory_within_budget"] is True
     assert report["validation"]["difference_comparison_performed"] is False
     assert [item["records_ingested"] for item in report["files"]] == [
         pair.record_count,
@@ -36,6 +38,7 @@ def test_benchmark_streams_records_and_validates_manifest(tmp_path, file_format)
     ]
     assert report["totals"]["bytes_ingested"] == 2 * pair.size_bytes
     assert report["totals"]["peak_process_memory_bytes"] > 0
+    assert report["totals"]["parser_only_seconds"] > 0
 
 
 def test_benchmark_rejects_manifest_outside_test_data(tmp_path) -> None:
