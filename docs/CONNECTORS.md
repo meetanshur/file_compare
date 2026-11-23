@@ -58,6 +58,25 @@ with connector.open("https://example.com/data.csv") as source:
 Non-success HTTP statuses and transport failures raise `HTTPSourceError` with
 a status or error type, without including the URL.
 
+The SFTP connector streams a remote file using the system SSH known-hosts
+database, rejecting unknown host keys. It authenticates through the SSH agent
+or default key files; passwords are not accepted in the URI or logged:
+
+```python
+from connectors.sftp import SFTPConnector
+
+connector = SFTPConnector()
+with connector.open("sftp://analyst@example.com/incoming/data.csv") as source:
+    print(source.metadata.size_bytes)
+    for chunk in source.read_chunks(4 * 1024 * 1024):
+        process(chunk)
+```
+
+Non-default ports can be specified in the URI. The remote file, SFTP session,
+and SSH client are closed when the opened source exits its context. Connection
+or file-access failures raise `SFTPSourceError` without exposing URI
+credentials.
+
 `SourceMetadata` contains a normalized URI, source type, name, optional byte
 size, timezone-aware modification time, content type, ETag/version identifiers,
 and optional checksum values. Values a connector cannot provide remain unset;
