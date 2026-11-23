@@ -7,7 +7,7 @@ import zipfile
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Literal
 from xml.etree.ElementTree import ParseError
 
 from openpyxl import load_workbook
@@ -25,8 +25,19 @@ class XLSXParseError(ValueError):
 
 
 @dataclass(frozen=True)
+class XLSXCellValue:
+    """A cell value together with its interpreted type and Excel format."""
+
+    value: Any
+    data_type: Literal["string", "number", "date", "boolean", "blank", "formula"]
+    number_format: str
+    formula: str | None = None
+    cached_value: Any = None
+
+
+@dataclass(frozen=True)
 class XLSXRecord:
-    """One worksheet row represented by header-to-cell-value mappings."""
+    """One worksheet row represented by header-to-cell mappings."""
 
     index: int
     sheet_name: str
@@ -93,9 +104,21 @@ class XLSXParser(Parser[XLSXRecord]):
                     read_only=True,
                     data_only=False,
                 )
+                cached_file = tempfile.TemporaryFile(mode="w+b", dir=self.temp_dir)
                 try:
-                    yield from self._iter_workbook(workbook)
+                    _copy_file(workbook_file, cached_file)
+                    cached_file.seek(0)
+                    cached_workbook = load_workbook(
+                        cached_file,
+                        read_only=True,
+                        data_only=True,
+                    )
+                    try:
+                        yield from self._iter_workbook(workbook, cached_workbook)
+                    finally:
+                        cached_workbook.close()
                 finally:
+                    cached_file.close()
                     workbook.close()
         except XLSXParseError:
             raise
@@ -111,39 +134,49 @@ class XLSXParser(Parser[XLSXRecord]):
                 f"Could not parse XLSX source {self.filename or '<stream>'} ({type(exc).__name__})"
             ) from exc
 
-    def _iter_workbook(self, workbook) -> Iterator[XLSXRecord]:
+    def _iter_workbook(self, workbook, cached_workbook) -> Iterator[XLSXRecord]:
         if self.sheet_name is not None:
             if self.sheet_name not in workbook.sheetnames:
                 raise XLSXParseError(f"Worksheet {self.sheet_name!r} does not exist")
-            worksheets = (workbook[self.sheet_name],)
+            worksheets = ((workbook[self.sheet_name], cached_workbook[self.sheet_name]),)
         else:
-            worksheets = iter(workbook.worksheets)
+            worksheets = zip(workbook.worksheets, cached_workbook.worksheets, strict=True)
 
-        for worksheet in worksheets:
-            yield from self._iter_worksheet(worksheet)
+        for worksheet, cached_worksheet in worksheets:
+            yield from self._iter_worksheet(worksheet, cached_worksheet)
 
-    def _iter_worksheet(self, worksheet) -> Iterator[XLSXRecord]:
-        rows = worksheet.iter_rows(values_only=True)
+    def _iter_worksheet(self, worksheet, cached_worksheet) -> Iterator[XLSXRecord]:
+        rows = worksheet.iter_rows(values_only=False)
+        cached_rows = cached_worksheet.iter_rows(values_only=False)
         try:
             first_row = next(rows)
+            cached_first_row = next(cached_rows)
         except StopIteration:
             return
 
         if self.has_header:
-            headers = _normalize_headers(first_row)
-            data_rows = rows
+            headers = _normalize_headers(tuple(cell.value for cell in first_row))
+            data_rows = zip(rows, cached_rows, strict=True)
             first_row_number = 2
         else:
             headers = _column_names(len(first_row))
-            data_rows = _prepend(first_row, rows)
+            data_rows = zip(
+                _prepend(first_row, rows),
+                _prepend(cached_first_row, cached_rows),
+                strict=True,
+            )
             first_row_number = 1
 
         index = 0
-        for row_number, row in enumerate(data_rows, start=first_row_number):
-            if not self.include_empty_rows and all(value is None for value in row):
+        for row_number, (row, cached_row) in enumerate(data_rows, start=first_row_number):
+            if not self.include_empty_rows and all(cell.value is None for cell in row):
                 continue
             index += 1
-            yield _record_from_row(index, worksheet.title, row_number, row, headers)
+            values = tuple(
+                _cell_value(cell, cached_cell)
+                for cell, cached_cell in zip(row, cached_row, strict=True)
+            )
+            yield _record_from_row(index, worksheet.title, row_number, values, headers)
 
 
 def _spool_source(source: BinaryIO, destination, sample_size_bytes: int) -> bytes:
@@ -162,9 +195,51 @@ def _spool_source(source: BinaryIO, destination, sample_size_bytes: int) -> byte
     return bytes(sample)
 
 
+def _copy_file(source, destination) -> None:
+    source.seek(0)
+    while chunk := source.read(_COPY_CHUNK_SIZE):
+        destination.write(chunk)
+
+
 def _prepend(first, rows):
     yield first
     yield from rows
+
+
+def _cell_value(cell, cached_cell) -> XLSXCellValue:
+    value = cell.value
+    cell_type = cell.data_type
+    if cell_type == "f":
+        data_type: Literal["string", "number", "date", "boolean", "blank", "formula"] = "formula"
+        formula = value
+        cached_value = cached_cell.value
+    elif value is None:
+        data_type = "blank"
+        formula = None
+        cached_value = None
+    elif cell_type == "b":
+        data_type = "boolean"
+        formula = None
+        cached_value = None
+    elif cell_type == "d":
+        data_type = "date"
+        formula = None
+        cached_value = None
+    elif cell_type == "n":
+        data_type = "number"
+        formula = None
+        cached_value = None
+    else:
+        data_type = "string"
+        formula = None
+        cached_value = None
+    return XLSXCellValue(
+        value=value,
+        data_type=data_type,
+        number_format=getattr(cell, "number_format", None) or "General",
+        formula=formula,
+        cached_value=cached_value,
+    )
 
 
 def _normalize_headers(row: tuple[Any, ...]) -> tuple[str, ...]:

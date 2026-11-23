@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from datetime import datetime
 from io import BytesIO
+from xml.etree import ElementTree
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 from openpyxl import Workbook
 
-from parsers import Parser, XLSXParseError, XLSXParser
+from parsers import Parser, XLSXCellValue, XLSXParseError, XLSXParser
 
 
 def _workbook_bytes() -> bytes:
@@ -30,9 +33,9 @@ def test_xlsx_parser_streams_rows_and_returns_sheet_metadata() -> None:
     assert records[0].sheet_name == "Data"
     assert records[0].row_number == 2
     assert records[0].values == {
-        "id": "007",
-        "amount": 1.1,
-        "description": "tail   ",
+        "id": XLSXCellValue("007", "string", "General"),
+        "amount": XLSXCellValue(1.1, "number", "General"),
+        "description": XLSXCellValue("tail   ", "string", "General"),
     }
     assert source.closed is False
 
@@ -56,7 +59,7 @@ def test_xlsx_parser_can_select_a_sheet_or_parse_all_sheets() -> None:
     )
 
     assert [record.sheet_name for record in all_records] == ["First", "Second"]
-    assert selected_records[0].values == {"id": "2"}
+    assert selected_records[0].values["id"].value == "2"
 
 
 def test_xlsx_parser_without_header_generates_columns() -> None:
@@ -69,7 +72,10 @@ def test_xlsx_parser_without_header_generates_columns() -> None:
         XLSXParser(filename="data.xlsx", has_header=False).parse(BytesIO(output.getvalue()))
     )
 
-    assert record.values == {"column_1": "007", "column_2": "1.10"}
+    assert {key: cell.value for key, cell in record.values.items()} == {
+        "column_1": "007",
+        "column_2": "1.10",
+    }
 
 
 def test_xlsx_parser_reports_missing_sheet_and_allows_explicit_format_override() -> None:
@@ -78,7 +84,7 @@ def test_xlsx_parser_reports_missing_sheet_and_allows_explicit_format_override()
         list(XLSXParser(filename="data.xlsx", sheet_name="Missing").parse(BytesIO(data)))
 
     records = list(XLSXParser(filename="data.bin", format_override="xlsx").parse(BytesIO(data)))
-    assert records[0].values["id"] == "007"
+    assert records[0].values["id"].value == "007"
 
 
 def test_xlsx_parser_rejects_non_xlsx_input_without_override() -> None:
@@ -116,3 +122,51 @@ def test_xlsx_parser_reads_nonseekable_source_with_bounded_reads(tmp_path) -> No
 
 def test_xlsx_parser_conforms_to_common_parser_protocol() -> None:
     assert isinstance(XLSXParser(filename="data.xlsx"), Parser)
+
+
+def test_xlsx_parser_preserves_cell_types_formats_and_formula_cache() -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Typed"
+    sheet.append(["text", "number", "date", "blank", "formula"])
+    sheet.append(["007", 1.1, datetime(2024, 1, 5), None, "=B2*2"])
+    sheet["B2"].number_format = "0.00"
+    sheet["C2"].number_format = "yyyy-mm-dd"
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    data = _add_formula_cache(output.getvalue(), "E2", "2.2")
+
+    record = next(XLSXParser(filename="typed.xlsx").parse(BytesIO(data)))
+
+    assert record.sheet_name == "Typed"
+    assert record.values["text"] == XLSXCellValue("007", "string", "General")
+    assert record.values["number"] == XLSXCellValue(1.1, "number", "0.00")
+    assert record.values["date"] == XLSXCellValue(datetime(2024, 1, 5), "date", "yyyy-mm-dd")
+    assert record.values["blank"] == XLSXCellValue(None, "blank", "General")
+    assert record.values["formula"] == XLSXCellValue(
+        "=B2*2",
+        "formula",
+        "General",
+        formula="=B2*2",
+        cached_value=2.2,
+    )
+
+
+def _add_formula_cache(data: bytes, cell_reference: str, cached_value: str) -> bytes:
+    input_archive = BytesIO(data)
+    output_archive = BytesIO()
+    with ZipFile(input_archive) as source, ZipFile(output_archive, "w", ZIP_DEFLATED) as target:
+        for item in source.infolist():
+            contents = source.read(item.filename)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                root = ElementTree.fromstring(contents)
+                namespace = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+                cell = root.find(f".//main:c[@r='{cell_reference}']", namespace)
+                assert cell is not None
+                value = cell.find("main:v", namespace)
+                assert value is not None
+                value.text = cached_value
+                contents = ElementTree.tostring(root)
+            target.writestr(item, contents)
+    return output_archive.getvalue()

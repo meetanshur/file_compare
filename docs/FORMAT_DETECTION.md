@@ -128,18 +128,24 @@ the header by default; `has_header=False` generates `column_1`, `column_2`,
 and so on. `format_override="xlsx"` can be used when the extension/content
 sample is ambiguous.
 
-Cell values are the Python values interpreted by openpyxl: text, booleans,
-numbers, dates, formulas (with `data_only=False`), or `None` for blank cells.
-Excel number formats are not applied to values, so numeric cells may not retain
-their display formatting or original XML lexical representation. Use raw
-comparison for exact workbook bytes and formatting differences.
+Each mapped value is an `XLSXCellValue` with the openpyxl-interpreted value,
+cell data type (`string`, `number`, `date`, `boolean`, `blank`, or `formula`),
+and Excel `number_format`. Formula cells expose the formula in both `value`
+and `formula`, plus `cached_value` from a second read-only pass with
+`data_only=True`. Cached results are only present if the workbook itself
+contains them; formulas are not recalculated. Numeric values are returned as
+interpreted by openpyxl, so their original XML lexical spelling (for example
+whether the source wrote `1.10` or `1.1`) is not retained. Use raw comparison
+for exact workbook bytes and formatting differences. Every row includes its
+worksheet name.
 
 Rows are read incrementally, but the compressed file is temporarily stored on
 disk and openpyxl may retain the workbook shared-string table in memory.
-Memory is therefore not guaranteed to be independent of workbook size. Ensure
-the temporary directory has enough free space and avoid oversized shared
-string tables within a constrained memory budget. The input stream remains
-owned by the caller.
+The workbook is opened twice to pair formula cells with cached values, so
+shared-string memory can be roughly doubled. Memory is therefore not
+guaranteed to be independent of workbook size. Ensure the temporary directory
+has enough free space and avoid oversized shared-string tables within a
+constrained memory budget. The input stream remains owned by the caller.
 
 ```python
 from parsers.structured import FixedWidthParser, JSONParser, PlainTextParser, YAMLParser
