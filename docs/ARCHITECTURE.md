@@ -65,6 +65,9 @@ findings in memory.
   retains only the selected record being snapshotted, so memory can still grow
   with the size of one individual record. Tabular parsers yield one bounded
   batch or record at a time.
+- Parsers implement the shared `Parser` protocol and yield records from binary
+  streams. CSV/TSV values remain text; malformed row widths are reported on
+  individual records, and any extra field text is retained.
 - Do not use whole-file helpers such as `read()`, `read_bytes()`, or
   `read_text()` on comparison inputs. Do not retain all parsed records in
   Python collections.

@@ -8,6 +8,8 @@ from typing import BinaryIO
 
 from lxml import etree
 
+from parsers.base import Parser
+
 
 class XMLParseError(ValueError):
     """An XML source is malformed or its record selector is ambiguous."""
@@ -30,6 +32,27 @@ class XmlRecord:
 
     index: int
     element: XmlElement
+
+
+class XMLParser(Parser[XmlRecord]):
+    """Parser adapter for the common incremental parser protocol."""
+
+    def __init__(
+        self,
+        *,
+        record_tag: str | None = None,
+        source_name: str = "<stream>",
+    ) -> None:
+        self.record_tag = record_tag
+        self.source_name = source_name
+
+    def parse(self, source: BinaryIO) -> Iterator[XmlRecord]:
+        """Yield XML records from the supplied source."""
+        return iter_xml_records(
+            source,
+            record_tag=self.record_tag,
+            source_name=self.source_name,
+        )
 
 
 def iter_xml_records(

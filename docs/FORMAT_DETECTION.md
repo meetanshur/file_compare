@@ -54,3 +54,33 @@ with open("records.xml", "rb") as stream:
     for record in iter_xml_records(stream, record_tag="record", source_name="records.xml"):
         process(record.element)
 ```
+
+## Streaming CSV and TSV records
+
+`CSVParser`, `TSVParser`, and `DelimitedTextParser` implement the common
+`Parser` protocol: `parse(binary_source)` incrementally yields records and
+never loads the complete input. The delimited parsers use Step 14 format and
+encoding detection by default. `format_override` and `encoding_override`
+provide explicit user overrides; the delimiter and header behavior are also
+configurable.
+
+Every parsed data field is retained as text without trimming or numeric
+coercion. Standard CSV quoting is interpreted: quote delimiters are removed,
+escaped quote characters are decoded, and the resulting field text—including
+spaces—is preserved. Empty or duplicate header names are assigned generated
+unique names to keep row mappings unambiguous. With `has_header=False`, columns
+are named `column_1`, `column_2`, and so on.
+
+Rows with too few columns receive a `too_few_columns` warning and contain only
+the values present. Rows with extra columns receive a `too_many_columns`
+warning; extra field text remains available in `extra_values`. Malformed CSV
+syntax and decode failures raise `DelimitedParseError`.
+
+```python
+from parsers.delimited import CSVParser
+
+parser = CSVParser(filename="input.csv", encoding_override="utf-8", has_header=True)
+with open("input.csv", "rb") as stream:
+    for record in parser.parse(stream):
+        process(record.values, record.warnings)
+```
