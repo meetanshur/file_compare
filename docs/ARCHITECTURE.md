@@ -68,6 +68,19 @@ findings in memory.
 - Parsers implement the shared `Parser` protocol and yield records from binary
   streams. CSV/TSV values remain text; malformed row widths are reported on
   individual records, and any extra field text is retained.
+- Record comparison accepts parser records one at a time, converts their fields
+  to text, and stores them in bounded DuckDB batches. Field values are retained
+  as supplied by the parser; key trimming and case folding affect only the
+  matching representation, not the stored source payload. JSON/XML nested
+  fields use dotted paths; XML attributes use an `@name` path and element text
+  uses `.#text`. XLSX cells use their parser-interpreted value (including the
+  formula text for formula cells); exact workbook-byte or lexical-number
+  differences remain the responsibility of raw comparison.
+- Record keys are exact text by default and may be configured with
+  `trim_keys` and `key_case_sensitive`. Duplicate keys produce one finding per
+  duplicate key per file. Because pairing duplicate records is ambiguous,
+  every key duplicated in either file is excluded from insert/update/delete
+  matching on both sides; no record is silently selected or discarded.
 - JSON array values and YAML documents are materialized one value/document at
   a time; JSON Lines and plain text are processed one line at a time. Fixed-
   width parsing requires configured field widths. Bound the largest record or

@@ -20,6 +20,7 @@ class ComparisonType(StrEnum):
     FIELD = "field"
     FINANCIAL = "financial"
     RECONCILIATION = "reconciliation"
+    DUPLICATE_KEY = "duplicate_key"
 
 
 class Severity(StrEnum):

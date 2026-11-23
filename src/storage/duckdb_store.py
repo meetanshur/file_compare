@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -15,7 +15,7 @@ from uuid import UUID, uuid4
 
 import duckdb
 
-from common.comparison_result import ComparisonType, Difference
+from common.comparison_result import ComparisonType, Difference, Severity
 
 
 class StorageError(RuntimeError):
@@ -149,12 +149,16 @@ class DuckDBStore:
                 side VARCHAR NOT NULL CHECK (side IN ('A', 'B')),
                 record_key JSON,
                 record_key_text VARCHAR,
-                payload JSON NOT NULL
+                payload JSON NOT NULL,
+                comparison_payload JSON
             )
             """
         )
         connection.execute(
             "ALTER TABLE comparison_records ADD COLUMN IF NOT EXISTS record_key_text VARCHAR"
+        )
+        connection.execute(
+            "ALTER TABLE comparison_records ADD COLUMN IF NOT EXISTS comparison_payload JSON"
         )
         connection.execute(
             """
@@ -210,28 +214,51 @@ class DuckDBStore:
         records: Iterable[Mapping[str, Any]],
         *,
         key_fields: Sequence[str] = (),
+        trim_keys: bool = False,
+        key_case_sensitive: bool = True,
+        cancellation_check: Callable[[], None] | None = None,
     ) -> int:
         """Persist a record stream in bounded batches and return its row count."""
         if not isinstance(side, RecordSide):
             raise ValueError("side must be a RecordSide value")
         inserted = 0
-        batch: list[tuple[str, str | None, str | None, str]] = []
+        batch: list[tuple[str, str | None, str | None, str, str | None]] = []
 
         with self._lock:
             self._require_connection()
             try:
                 for record in records:
+                    if cancellation_check is not None:
+                        cancellation_check()
                     missing_keys = [field for field in key_fields if field not in record]
                     if missing_keys:
                         raise ValueError(f"Record is missing key fields: {', '.join(missing_keys)}")
-                    key = [[field, record[field]] for field in key_fields] if key_fields else None
+                    key = None
+                    comparison_record = dict(record)
+                    if key_fields:
+                        key = []
+                        for field in key_fields:
+                            value = record[field]
+                            if trim_keys or not key_case_sensitive:
+                                value = str(value)
+                                if trim_keys:
+                                    value = value.strip()
+                                if not key_case_sensitive:
+                                    value = value.casefold()
+                            key.append([field, value])
+                            comparison_record[field] = value
                     key_json = None if key is None else _serialize_json(key)
+                    payload_json = _serialize_json(record)
+                    comparison_payload_json = (
+                        None if comparison_record == record else _serialize_json(comparison_record)
+                    )
                     batch.append(
                         (
                             side.value,
                             key_json,
                             key_json,
-                            _serialize_json(record),
+                            payload_json,
+                            comparison_payload_json,
                         )
                     )
                     if len(batch) >= self.batch_size:
@@ -248,12 +275,169 @@ class DuckDBStore:
                 ) from exc
         return inserted
 
-    def _insert_record_batch(self, batch: list[tuple[str, str | None, str | None, str]]) -> None:
+    def iter_record_comparison_differences(
+        self,
+        *,
+        cancellation_check: Callable[[], None] | None = None,
+        batch_size: int = 1_000,
+    ) -> Iterator[Difference]:
+        """Yield SQL-joined record differences, reporting and excluding ambiguous keys."""
+        if batch_size < 1:
+            raise ValueError("batch_size must be greater than zero")
+
+        with self._lock:
+            connection = self._require_connection()
+            try:
+                connection.execute("DROP TABLE IF EXISTS record_comparison_findings")
+                limit_clause = ""
+                if self.max_total_differences:
+                    remaining = self.max_total_differences - self._difference_count
+                    limit_clause = f"LIMIT {max(1, remaining)}"
+                connection.execute(
+                    f"""
+                    CREATE TEMP TABLE record_comparison_findings AS
+                    WITH key_counts AS (
+                        SELECT side, record_key_text, count(*) AS record_count
+                        FROM comparison_records
+                        WHERE record_key_text IS NOT NULL
+                        GROUP BY side, record_key_text
+                    ),
+                    duplicate_keys AS (
+                        SELECT record_key_text
+                        FROM key_counts
+                        WHERE record_count > 1
+                        GROUP BY record_key_text
+                    ),
+                    unique_a AS (
+                        SELECT record_id, record_key, record_key_text, payload, comparison_payload
+                        FROM comparison_records
+                        WHERE side = 'A'
+                          AND record_key_text IS NOT NULL
+                          AND record_key_text NOT IN (SELECT record_key_text FROM duplicate_keys)
+                    ),
+                    unique_b AS (
+                        SELECT record_id, record_key, record_key_text, payload, comparison_payload
+                        FROM comparison_records
+                        WHERE side = 'B'
+                          AND record_key_text IS NOT NULL
+                          AND record_key_text NOT IN (SELECT record_key_text FROM duplicate_keys)
+                    ),
+                    duplicate_findings AS (
+                        SELECT
+                            'duplicate_key' AS comparison_type,
+                            c.record_key_text,
+                            min(c.record_key_text)::JSON AS record_key,
+                            c.side,
+                            c.record_count,
+                            NULL::JSON AS value_a,
+                            NULL::JSON AS value_b
+                        FROM key_counts c
+                        WHERE c.record_count > 1
+                        GROUP BY c.record_key_text, c.side, c.record_count
+                    ),
+                    record_findings AS (
+                        SELECT
+                            CASE
+                                WHEN a.record_id IS NULL THEN 'insert'
+                                WHEN b.record_id IS NULL THEN 'delete'
+                                ELSE 'update'
+                            END AS comparison_type,
+                            coalesce(a.record_key_text, b.record_key_text) AS record_key_text,
+                            coalesce(a.record_key, b.record_key) AS record_key,
+                            NULL::VARCHAR AS side,
+                            NULL::BIGINT AS record_count,
+                            a.payload AS value_a,
+                            b.payload AS value_b
+                        FROM unique_a a
+                        FULL OUTER JOIN unique_b b
+                          ON a.record_key_text = b.record_key_text
+                        WHERE a.record_id IS NULL
+                           OR b.record_id IS NULL
+                           OR coalesce(a.comparison_payload, a.payload)
+                              IS DISTINCT FROM
+                              coalesce(b.comparison_payload, b.payload)
+                    )
+                    SELECT *
+                    FROM (
+                        SELECT * FROM duplicate_findings
+                        UNION ALL
+                        SELECT * FROM record_findings
+                    ) all_findings
+                    ORDER BY comparison_type, record_key_text, side
+                    {limit_clause}
+                    """
+                )
+                offset = 0
+                while True:
+                    if cancellation_check is not None:
+                        cancellation_check()
+                    rows = connection.execute(
+                        """
+                        SELECT comparison_type, record_key, side, record_count, value_a, value_b
+                        FROM record_comparison_findings
+                        ORDER BY comparison_type, record_key_text, side
+                        LIMIT ? OFFSET ?
+                        """,
+                        [batch_size, offset],
+                    ).fetchall()
+                    if not rows:
+                        break
+                    offset += len(rows)
+                    for comparison_type, record_key, side, record_count, value_a, value_b in rows:
+                        if cancellation_check is not None:
+                            cancellation_check()
+                        key = json.loads(record_key) if isinstance(record_key, str) else record_key
+                        key_text = _serialize_json(key)
+                        if comparison_type == ComparisonType.DUPLICATE_KEY.value:
+                            yield Difference(
+                                comparison_type=ComparisonType.DUPLICATE_KEY,
+                                location=f"side={side} key={key_text}",
+                                message=(
+                                    f"Duplicate record key appears {record_count} times in "
+                                    f"file {side}; this key is excluded from insert/update/delete "
+                                    "matching because its record pairing is ambiguous."
+                                ),
+                                severity=Severity.ERROR,
+                                value_a={"key": key, "count": record_count},
+                                value_b=None,
+                            )
+                            continue
+                        category = ComparisonType(comparison_type)
+                        if isinstance(value_a, str):
+                            value_a = json.loads(value_a)
+                        if isinstance(value_b, str):
+                            value_b = json.loads(value_b)
+                        message = {
+                            ComparisonType.INSERT: "Record exists only in file B",
+                            ComparisonType.UPDATE: "Record fields differ",
+                            ComparisonType.DELETE: "Record exists only in file A",
+                        }[category]
+                        yield Difference(
+                            comparison_type=category,
+                            location=f"key={key_text}",
+                            message=message,
+                            value_a=value_a,
+                            value_b=value_b,
+                        )
+            except duckdb.Error as exc:
+                raise StorageError("Could not compare stored records in DuckDB.") from exc
+            finally:
+                connection.execute("DROP TABLE IF EXISTS record_comparison_findings")
+
+    def _insert_record_batch(
+        self, batch: list[tuple[str, str | None, str | None, str, str | None]]
+    ) -> None:
         connection = self._require_connection()
         connection.execute("BEGIN TRANSACTION")
         appender = connection.appender(
             "comparison_records",
-            columns=["side", "record_key", "record_key_text", "payload"],
+            columns=[
+                "side",
+                "record_key",
+                "record_key_text",
+                "payload",
+                "comparison_payload",
+            ],
         )
         try:
             appender.append_rows(batch)
@@ -317,8 +501,9 @@ class DuckDBStore:
                 force_not_null = "[" + ", ".join(quote_literal(column) for column in columns) + "]"
                 query = f"""
                     INSERT INTO comparison_records
-                        (side, record_key, record_key_text, payload)
-                    SELECT ?::VARCHAR, {key_json}, CAST({key_json} AS VARCHAR), {payload_json}
+                        (side, record_key, record_key_text, payload, comparison_payload)
+                    SELECT ?::VARCHAR, {key_json}, CAST({key_json} AS VARCHAR),
+                        {payload_json}, NULL::JSON
                     FROM read_csv(
                         ?, header = true, all_varchar = true, auto_detect = true,
                         force_not_null = {force_not_null}

@@ -48,6 +48,8 @@ class ComparisonConfig(BaseModel):
     max_total_differences: int = Field(default=1_000_000, ge=0)
     levels: ComparisonLevels = Field(default_factory=ComparisonLevels)
     record_key: list[str] = Field(default_factory=list)
+    trim_keys: bool = False
+    key_case_sensitive: bool = True
     ignore_fields: list[str] = Field(default_factory=list)
     numeric_tolerance: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
     case_sensitive: bool = True

@@ -8,6 +8,11 @@ from comparators.raw import (
     RawDifference,
     RawDifferenceKind,
 )
+from comparators.records import (
+    RecordComparator,
+    RecordComparisonResult,
+    parser_record_to_text_mapping,
+)
 from comparators.xml_schema import XMLSchemaComparator, XMLSchemaError, validate_xml_schema
 
 __all__ = [
@@ -19,7 +24,10 @@ __all__ = [
     "RawComparisonStatus",
     "RawDifference",
     "RawDifferenceKind",
+    "RecordComparator",
+    "RecordComparisonResult",
     "XMLSchemaComparator",
     "XMLSchemaError",
     "validate_xml_schema",
+    "parser_record_to_text_mapping",
 ]
