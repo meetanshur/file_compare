@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Deterministic, streaming comparison of large files"
 requires-python = ">=3.11"
 dependencies = [
+    "duckdb>=1.2",
     "pydantic>=2.0",
     "PyYAML>=6.0",
 ]

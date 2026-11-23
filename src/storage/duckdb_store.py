@@ -1,0 +1,452 @@
+"""Bounded-batch DuckDB storage for records and comparison findings."""
+
+from __future__ import annotations
+
+import json
+import threading
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import date, datetime
+from decimal import Decimal
+from enum import StrEnum
+from pathlib import Path
+from typing import Any
+from uuid import UUID, uuid4
+
+import duckdb
+
+from common.comparison_result import ComparisonType, Difference
+
+
+class StorageError(RuntimeError):
+    """A persistent storage operation failed."""
+
+
+class RecordSide(StrEnum):
+    """Input file a stored record belongs to."""
+
+    FILE_A = "A"
+    FILE_B = "B"
+
+
+@dataclass(frozen=True)
+class StoredRecord:
+    """A record fetched from persistent storage."""
+
+    record_id: int
+    side: RecordSide
+    record_key: list[list[Any]] | None
+    payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class PersistResult:
+    """Outcome of persisting a bounded stream of findings."""
+
+    inserted: int
+    total_persisted: int
+    truncated: bool
+
+
+def _json_default(value: Any) -> str:
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, UUID):
+        return str(value)
+    raise TypeError(f"Value of type {type(value).__name__} is not JSON serializable")
+
+
+def _serialize_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        default=_json_default,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+class DuckDBStore:
+    """Store streamed records and findings in a job-scoped DuckDB database."""
+
+    def __init__(
+        self,
+        database_path: str | Path,
+        *,
+        job_id: UUID | None = None,
+        memory_limit: str = "512MB",
+        temp_directory: str | Path | None = None,
+        max_total_differences: int = 1_000_000,
+        batch_size: int = 1_000,
+    ) -> None:
+        if max_total_differences < 0:
+            raise ValueError("max_total_differences must be zero or greater")
+        if batch_size < 1:
+            raise ValueError("batch_size must be greater than zero")
+
+        self.database_path = Path(database_path)
+        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        self.temp_directory = (
+            Path(temp_directory)
+            if temp_directory is not None
+            else self.database_path.parent / f"{self.database_path.stem}_tmp"
+        )
+        self.temp_directory.mkdir(parents=True, exist_ok=True)
+        self.max_total_differences = max_total_differences
+        self.batch_size = batch_size
+        self._lock = threading.RLock()
+        self._connection: duckdb.DuckDBPyConnection | None = None
+
+        try:
+            self._connection = duckdb.connect(
+                str(self.database_path),
+                config={
+                    "memory_limit": memory_limit,
+                    "temp_directory": str(self.temp_directory),
+                },
+            )
+            self._initialize_schema()
+            stored_job_id = self._get_metadata("job_id")
+            if stored_job_id is None:
+                stored_job_id = str(job_id or uuid4())
+                self._set_metadata("job_id", stored_job_id)
+            elif job_id is not None and stored_job_id != str(job_id):
+                raise ValueError("The database already belongs to a different comparison job")
+            self.job_id = UUID(stored_job_id)
+            self._difference_count = self.count_differences()
+            self._truncated = self._get_metadata("truncated") == "true"
+        except (duckdb.Error, OSError) as exc:
+            self._close_after_initialization_failure()
+            raise StorageError(
+                "Could not initialize DuckDB storage; check database and temporary-directory "
+                "permissions and free disk space."
+            ) from exc
+        except ValueError:
+            self._close_after_initialization_failure()
+            raise
+
+    def _initialize_schema(self) -> None:
+        connection = self._require_connection()
+        connection.execute("CREATE SEQUENCE IF NOT EXISTS record_id_sequence")
+        connection.execute("CREATE SEQUENCE IF NOT EXISTS difference_id_sequence")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS store_metadata (
+                key VARCHAR PRIMARY KEY,
+                value VARCHAR NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS comparison_records (
+                record_id BIGINT PRIMARY KEY DEFAULT nextval('record_id_sequence'),
+                side VARCHAR NOT NULL CHECK (side IN ('A', 'B')),
+                record_key JSON,
+                payload JSON NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS comparison_differences (
+                difference_id BIGINT PRIMARY KEY DEFAULT nextval('difference_id_sequence'),
+                payload JSON NOT NULL
+            )
+            """
+        )
+
+    def _require_connection(self) -> duckdb.DuckDBPyConnection:
+        if self._connection is None:
+            raise StorageError("DuckDB storage is closed")
+        return self._connection
+
+    def _get_metadata(self, key: str) -> str | None:
+        row = (
+            self._require_connection()
+            .execute("SELECT value FROM store_metadata WHERE key = ?", [key])
+            .fetchone()
+        )
+        return None if row is None else str(row[0])
+
+    def _set_metadata(self, key: str, value: str) -> None:
+        self._require_connection().execute(
+            """
+            INSERT INTO store_metadata (key, value) VALUES (?, ?)
+            ON CONFLICT (key) DO UPDATE SET value = excluded.value
+            """,
+            [key, value],
+        )
+
+    def _close_after_initialization_failure(self) -> None:
+        if self._connection is not None:
+            self._connection.close()
+            self._connection = None
+
+    @property
+    def truncated(self) -> bool:
+        """Whether the configured persisted-finding limit stopped the job."""
+        return self._truncated
+
+    def insert_records(
+        self,
+        side: RecordSide,
+        records: Iterable[Mapping[str, Any]],
+        *,
+        key_fields: Sequence[str] = (),
+    ) -> int:
+        """Persist a record stream in bounded batches and return its row count."""
+        if not isinstance(side, RecordSide):
+            raise ValueError("side must be a RecordSide value")
+        inserted = 0
+        batch: list[tuple[str, str | None, str]] = []
+
+        with self._lock:
+            self._require_connection()
+            try:
+                for record in records:
+                    missing_keys = [field for field in key_fields if field not in record]
+                    if missing_keys:
+                        raise ValueError(f"Record is missing key fields: {', '.join(missing_keys)}")
+                    key = [[field, record[field]] for field in key_fields] if key_fields else None
+                    batch.append(
+                        (
+                            side.value,
+                            None if key is None else _serialize_json(key),
+                            _serialize_json(record),
+                        )
+                    )
+                    if len(batch) >= self.batch_size:
+                        self._insert_record_batch(batch)
+                        inserted += len(batch)
+                        batch.clear()
+                if batch:
+                    self._insert_record_batch(batch)
+                    inserted += len(batch)
+            except (duckdb.Error, OSError) as exc:
+                raise StorageError(
+                    "Could not persist records to DuckDB; check free disk space and storage "
+                    "permissions."
+                ) from exc
+        return inserted
+
+    def _insert_record_batch(self, batch: list[tuple[str, str | None, str]]) -> None:
+        connection = self._require_connection()
+        connection.execute("BEGIN TRANSACTION")
+        try:
+            connection.executemany(
+                """
+                INSERT INTO comparison_records (side, record_key, payload)
+                VALUES (?, ?::JSON, ?::JSON)
+                """,
+                batch,
+            )
+            connection.execute("COMMIT")
+        except duckdb.Error:
+            connection.execute("ROLLBACK")
+            raise
+
+    def count_records(self, side: RecordSide | None = None) -> int:
+        """Return the number of records stored, optionally for one input side."""
+        with self._lock:
+            try:
+                if side is None:
+                    row = (
+                        self._require_connection()
+                        .execute("SELECT count(*) FROM comparison_records")
+                        .fetchone()
+                    )
+                else:
+                    row = (
+                        self._require_connection()
+                        .execute(
+                            "SELECT count(*) FROM comparison_records WHERE side = ?",
+                            [side.value],
+                        )
+                        .fetchone()
+                    )
+            except duckdb.Error as exc:
+                raise StorageError("Could not count stored records.") from exc
+        return int(row[0])
+
+    def iter_records(
+        self, side: RecordSide | None = None, *, batch_size: int = 1_000
+    ) -> Iterator[StoredRecord]:
+        """Yield stored records in bounded batches."""
+        if batch_size < 1:
+            raise ValueError("batch_size must be greater than zero")
+
+        with self._lock:
+            try:
+                connection = self._require_connection()
+                if side is None:
+                    cursor = connection.execute(
+                        """
+                        SELECT record_id, side, record_key, payload
+                        FROM comparison_records ORDER BY record_id
+                        """
+                    )
+                else:
+                    cursor = connection.execute(
+                        """
+                        SELECT record_id, side, record_key, payload
+                        FROM comparison_records WHERE side = ? ORDER BY record_id
+                        """,
+                        [side.value],
+                    )
+                while rows := cursor.fetchmany(batch_size):
+                    for record_id, row_side, record_key, payload in rows:
+                        yield StoredRecord(
+                            record_id=record_id,
+                            side=RecordSide(row_side),
+                            record_key=None if record_key is None else json.loads(record_key),
+                            payload=json.loads(payload),
+                        )
+            except duckdb.Error as exc:
+                raise StorageError("Could not read stored records.") from exc
+
+    def insert_differences(self, differences: Iterable[Difference]) -> PersistResult:
+        """Persist findings in bounded batches until the configured limit is met."""
+        inserted = 0
+        batch: list[tuple[str]] = []
+
+        with self._lock:
+            self._require_connection()
+            try:
+                for difference in differences:
+                    if self._truncated or (
+                        self.max_total_differences > 0
+                        and self._difference_count >= self.max_total_differences
+                    ):
+                        self._mark_truncated()
+                        break
+                    batch.append((_serialize_json(difference.model_dump(mode="json")),))
+                    if len(batch) >= self._allowed_batch_size():
+                        self._insert_difference_batch(batch)
+                        inserted += len(batch)
+                        self._difference_count += len(batch)
+                        batch.clear()
+                        if self._at_difference_limit():
+                            self._mark_truncated()
+                            break
+                if batch:
+                    self._insert_difference_batch(batch)
+                    inserted += len(batch)
+                    self._difference_count += len(batch)
+                    if self._at_difference_limit():
+                        self._mark_truncated()
+            except (duckdb.Error, OSError) as exc:
+                raise StorageError(
+                    "Could not persist comparison findings to DuckDB; check free disk space "
+                    "and storage permissions."
+                ) from exc
+
+        return PersistResult(
+            inserted=inserted,
+            total_persisted=self._difference_count,
+            truncated=self._truncated,
+        )
+
+    def _allowed_batch_size(self) -> int:
+        if self.max_total_differences == 0:
+            return self.batch_size
+        remaining = self.max_total_differences - self._difference_count
+        return min(self.batch_size, remaining)
+
+    def _at_difference_limit(self) -> bool:
+        return (
+            self.max_total_differences > 0 and self._difference_count >= self.max_total_differences
+        )
+
+    def _mark_truncated(self) -> None:
+        self._truncated = True
+        self._set_metadata("truncated", "true")
+
+    def _insert_difference_batch(self, batch: list[tuple[str]]) -> None:
+        connection = self._require_connection()
+        connection.execute("BEGIN TRANSACTION")
+        try:
+            connection.executemany(
+                "INSERT INTO comparison_differences (payload) VALUES (?::JSON)", batch
+            )
+            connection.execute("COMMIT")
+        except duckdb.Error:
+            connection.execute("ROLLBACK")
+            raise
+
+    def count_differences(self, comparison_type: ComparisonType | None = None) -> int:
+        """Return persisted finding count, optionally by comparison category."""
+        with self._lock:
+            try:
+                connection = self._require_connection()
+                if comparison_type is None:
+                    row = connection.execute(
+                        "SELECT count(*) FROM comparison_differences"
+                    ).fetchone()
+                else:
+                    row = connection.execute(
+                        """
+                        SELECT count(*)
+                        FROM comparison_differences
+                        WHERE json_extract_string(payload, '$.comparison_type') = ?
+                        """,
+                        [comparison_type.value],
+                    ).fetchone()
+            except duckdb.Error as exc:
+                raise StorageError("Could not count stored findings.") from exc
+        return int(row[0])
+
+    def iter_differences(
+        self,
+        *,
+        batch_size: int = 1_000,
+        comparison_type: ComparisonType | None = None,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> Iterator[Difference]:
+        """Yield findings in bounded batches, optionally for a page or category."""
+        if batch_size < 1:
+            raise ValueError("batch_size must be greater than zero")
+        if offset < 0 or (limit is not None and limit < 0):
+            raise ValueError("offset and limit must be zero or greater")
+
+        with self._lock:
+            try:
+                connection = self._require_connection()
+                query = "SELECT payload FROM comparison_differences"
+                parameters: list[Any] = []
+                if comparison_type is not None:
+                    query += " WHERE json_extract_string(payload, '$.comparison_type') = ?"
+                    parameters.append(comparison_type.value)
+                query += " ORDER BY difference_id"
+                if limit is not None:
+                    query += " LIMIT ?"
+                    parameters.append(limit)
+                if offset:
+                    query += " OFFSET ?"
+                    parameters.append(offset)
+                cursor = connection.execute(query, parameters)
+                while rows := cursor.fetchmany(batch_size):
+                    for (payload,) in rows:
+                        yield Difference.model_validate_json(payload)
+            except duckdb.Error as exc:
+                raise StorageError("Could not read stored findings.") from exc
+
+    def close(self) -> None:
+        """Close the database connection."""
+        with self._lock:
+            if self._connection is not None:
+                try:
+                    self._connection.close()
+                except duckdb.Error as exc:
+                    raise StorageError("Could not close DuckDB storage cleanly.") from exc
+                finally:
+                    self._connection = None
+
+    def __enter__(self) -> DuckDBStore:
+        return self
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
+        self.close()
