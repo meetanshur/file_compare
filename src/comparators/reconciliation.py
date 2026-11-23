@@ -25,14 +25,22 @@ class ReconciliationComparisonResult:
 
     records_file_a: int
     records_file_b: int
+    bad_amounts_file_a: int
+    bad_amounts_file_b: int
     totals_file_a: dict[str, dict[str, Decimal]]
     totals_file_b: dict[str, dict[str, Decimal]]
     differences: PersistResult
+
+    @property
+    def bad_amounts(self) -> int:
+        """Return the number of malformed monetary values in both inputs."""
+        return self.bad_amounts_file_a + self.bad_amounts_file_b
 
 
 @dataclass
 class _SideTotals:
     record_count: int = 0
+    bad_amount_count: int = 0
     totals: dict[str, dict[str, Decimal]] = field(default_factory=dict)
     observed_fields: set[str] = field(default_factory=set)
 
@@ -53,8 +61,22 @@ class ReconciliationComparator:
         effective = config or ComparisonConfig()
         rules = effective.reconciliation_rules
         fields = _configured_fields(rules)
-        side_a = _aggregate_records(records_a, "A", rules, effective, cancellation_check)
-        side_b = _aggregate_records(records_b, "B", rules, effective, cancellation_check)
+        pending_warnings: list[Difference] = []
+
+        def persist_bad_amount_warning(warning: Difference) -> None:
+            pending_warnings.append(warning)
+            if len(pending_warnings) >= store.batch_size:
+                store.insert_differences(pending_warnings)
+                pending_warnings.clear()
+
+        side_a = _aggregate_records(
+            records_a, "A", rules, effective, cancellation_check, persist_bad_amount_warning
+        )
+        side_b = _aggregate_records(
+            records_b, "B", rules, effective, cancellation_check, persist_bad_amount_warning
+        )
+        if pending_warnings:
+            store.insert_differences(pending_warnings)
 
         observed_fields = side_a.observed_fields | side_b.observed_fields
         missing_fields = sorted(fields - observed_fields)
@@ -72,6 +94,8 @@ class ReconciliationComparator:
         return ReconciliationComparisonResult(
             records_file_a=side_a.record_count,
             records_file_b=side_b.record_count,
+            bad_amounts_file_a=side_a.bad_amount_count,
+            bad_amounts_file_b=side_b.bad_amount_count,
             totals_file_a=side_a.totals,
             totals_file_b=side_b.totals,
             differences=differences,
@@ -97,6 +121,7 @@ def _aggregate_records(
     rules: ReconciliationRules,
     config: ComparisonConfig,
     cancellation_check: Callable[[], None] | None,
+    bad_amount_callback: Callable[[Difference], None],
 ) -> _SideTotals:
     result = _SideTotals()
     metric_fields = {
@@ -110,53 +135,98 @@ def _aggregate_records(
     }
     configured_fields = _configured_fields(rules)
 
-    for record in records:
-        if cancellation_check is not None:
-            cancellation_check()
-        values = _record_values(record, configured_fields)
-        result.record_count += 1
-        result.observed_fields.update(configured_fields.intersection(values))
-
-        currency: str | None = None
-        if rules.currency_field is not None:
-            raw_currency = values.get(rules.currency_field, "")
-            if raw_currency.strip():
-                currency = _normalize_currency(raw_currency, config)
-
-        metric_values: dict[str, Decimal] = {}
-        for metric, field_name in metric_fields.items():
-            raw_value = values.get(field_name, "")
-            if not raw_value.strip():
-                metric_values[metric] = Decimal(0)
-                continue
+    iterator = iter(records)
+    while True:
+        batch = []
+        for _ in range(1000):
+            if cancellation_check is not None:
+                cancellation_check()
             try:
-                amount = Decimal(raw_value)
-            except InvalidOperation as exc:
-                raise ValueError(
-                    f"Invalid {metric} value in file {side}, record {result.record_count}, "
-                    f"field {field_name!r}: {raw_value!r}"
-                ) from exc
-            if not amount.is_finite():
-                raise ValueError(
-                    f"Non-finite {metric} value in file {side}, record {result.record_count}, "
-                    f"field {field_name!r}: {raw_value!r}"
-                )
-            metric_values[metric] = amount
+                batch.append(next(iterator))
+            except StopIteration:
+                break
+        if not batch:
+            break
+        for record in batch:
+            values = _record_values(record, configured_fields)
+            result.record_count += 1
+            result.observed_fields.update(configured_fields.intersection(values))
 
-        if metric_values and any(metric_values.values()):
-            if currency is None:
-                raise ValueError(
-                    f"Missing currency in file {side}, record {result.record_count}, "
-                    f"field {rules.currency_field!r}"
+            currency: str | None = None
+            if rules.currency_field is not None:
+                raw_currency = values.get(rules.currency_field, "")
+                if raw_currency.strip():
+                    currency = _normalize_currency(raw_currency, config)
+
+            metric_values: dict[str, Decimal] = {}
+            for metric, field_name in metric_fields.items():
+                raw_value = values.get(field_name, "")
+                try:
+                    amount = Decimal(raw_value.strip())
+                except InvalidOperation:
+                    result.bad_amount_count += 1
+                    bad_amount_callback(
+                        _bad_amount_difference(
+                            side,
+                            _record_number(record, result.record_count),
+                            field_name,
+                            raw_value,
+                            metric,
+                        )
+                    )
+                    continue
+                if not amount.is_finite():
+                    result.bad_amount_count += 1
+                    bad_amount_callback(
+                        _bad_amount_difference(
+                            side,
+                            _record_number(record, result.record_count),
+                            field_name,
+                            raw_value,
+                            metric,
+                        )
+                    )
+                    continue
+                metric_values[metric] = amount
+
+            if metric_values and any(metric_values.values()):
+                if currency is None:
+                    raise ValueError(
+                        f"Missing currency in file {side}, record {result.record_count}, "
+                        f"field {rules.currency_field!r}"
+                    )
+            if currency is not None:
+                currency_totals = result.totals.setdefault(
+                    currency, {metric: Decimal(0) for metric in metric_fields}
                 )
-        if currency is not None:
-            currency_totals = result.totals.setdefault(
-                currency, {metric: Decimal(0) for metric in metric_fields}
-            )
-            for metric, amount in metric_values.items():
-                currency_totals[metric] = _add_exact(currency_totals[metric], amount)
+                for metric, amount in metric_values.items():
+                    currency_totals[metric] = _add_exact(currency_totals[metric], amount)
 
     return result
+
+
+def _record_number(record: object, fallback: int) -> int:
+    for attribute in ("row_number", "index"):
+        number = getattr(record, attribute, None)
+        if isinstance(number, int):
+            return number
+    return fallback
+
+
+def _bad_amount_difference(
+    side: str, row_number: int, field_name: str, raw_value: str, metric: str
+) -> Difference:
+    display_value = raw_value if raw_value else "<empty>"
+    return Difference(
+        comparison_type=ComparisonType.RECONCILIATION,
+        location=f"file={side} row={row_number} field={field_name}",
+        message=(
+            f"Malformed {metric} value {display_value!r}; excluded from reconciliation totals"
+        ),
+        severity=Severity.WARNING,
+        value_a={"raw_value": raw_value},
+        value_b=None,
+    )
 
 
 def _record_values(record: object, configured_fields: set[str]) -> dict[str, str]:

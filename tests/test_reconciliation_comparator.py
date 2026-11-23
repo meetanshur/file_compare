@@ -12,6 +12,7 @@ from common.comparison_config import (
 )
 from common.comparison_result import ComparisonType, Severity
 from comparators.reconciliation import ReconciliationComparator
+from parsers.structured import StructuredRecord
 from parsers.xlsx import XLSXCellValue, XLSXRecord
 from storage.duckdb_store import DuckDBStore
 
@@ -108,7 +109,7 @@ def test_reconciliation_aggregates_debit_and_credit_by_currency(tmp_path) -> Non
     )
     store, result = _compare(
         tmp_path,
-        [{"currency": "USD", "debit": "5.25", "credit": ""}],
+        [{"currency": "USD", "debit": "5.25", "credit": "0.00"}],
         [{"currency": "USD", "debit": "5.00", "credit": "0.25"}],
         config=config,
     )
@@ -128,6 +129,40 @@ def test_reconciliation_aggregates_debit_and_credit_by_currency(tmp_path) -> Non
     assert {item.location for item in findings} == {
         "currency=USD credit_total",
         "currency=USD debit_total",
+    }
+
+
+def test_reconciliation_keeps_three_currency_totals_separate(tmp_path) -> None:
+    config = ComparisonConfig(
+        reconciliation_rules=ReconciliationRules(
+            currency_field="currency",
+            debit_field="debit",
+            credit_field="credit",
+        )
+    )
+    rows_a = [
+        {"currency": "USD", "debit": "10.00", "credit": "2.00"},
+        {"currency": "EUR", "debit": "20.00", "credit": "3.00"},
+        {"currency": "JPY", "debit": "30.00", "credit": "4.00"},
+    ]
+    rows_b = [
+        {"currency": "USD", "debit": "10.01", "credit": "1.99"},
+        {"currency": "EUR", "debit": "20.00", "credit": "3.00"},
+        {"currency": "JPY", "debit": "30.00", "credit": "4.00"},
+    ]
+    store, result = _compare(tmp_path, rows_a, rows_b, config=config)
+    try:
+        findings = list(store.iter_differences(comparison_type=ComparisonType.RECONCILIATION))
+    finally:
+        store.close()
+
+    assert set(result.totals_file_a) == {"USD", "EUR", "JPY"}
+    assert result.totals_file_a["USD"]["debit"] == Decimal("10.00")
+    assert result.totals_file_a["EUR"]["debit"] == Decimal("20.00")
+    assert result.totals_file_a["JPY"]["debit"] == Decimal("30.00")
+    assert {item.location for item in findings} == {
+        "currency=USD debit_total",
+        "currency=USD credit_total",
     }
 
 
@@ -152,21 +187,61 @@ def test_reconciliation_honors_tolerance_and_currency_normalization(tmp_path) ->
     assert findings == []
 
 
-def test_reconciliation_rejects_invalid_non_finite_and_missing_currency_values(tmp_path) -> None:
+@pytest.mark.parametrize("bad_value", ["abc", "", "1,000.00", "1.2.3"])
+def test_reconciliation_warns_for_bad_amounts_and_excludes_them(tmp_path, bad_value) -> None:
     config = ComparisonConfig(
         reconciliation_rules=ReconciliationRules(currency_field="currency", amount_field="amount")
     )
-    for row, message in (
-        ({"currency": "USD", "amount": "not-money"}, "Invalid amount"),
-        ({"currency": "USD", "amount": "NaN"}, "Non-finite amount"),
-        ({"amount": "1.00"}, "Missing currency"),
-    ):
-        store = DuckDBStore(tmp_path / f"{message.split()[0].lower()}.duckdb")
-        try:
-            with pytest.raises(ValueError, match=message):
-                ReconciliationComparator().compare(store, [row], [], config=config)
-        finally:
-            store.close()
+    rows = [
+        StructuredRecord(index=7, value={"currency": "USD", "amount": "2.50"}),
+        StructuredRecord(index=8, value={"currency": "USD", "amount": bad_value}),
+    ]
+    store, result = _compare(tmp_path, rows, [], config=config)
+    try:
+        findings = list(store.iter_differences(comparison_type=ComparisonType.RECONCILIATION))
+    finally:
+        store.close()
+
+    bad_amount_warning = next(item for item in findings if "Malformed amount" in item.message)
+    assert result.bad_amounts == 1
+    assert result.bad_amounts_file_a == 1
+    assert result.bad_amounts_file_b == 0
+    assert result.totals_file_a["USD"]["amount"] == Decimal("2.50")
+    assert bad_amount_warning.severity is Severity.WARNING
+    assert bad_amount_warning.location == "file=A row=8 field=amount"
+    assert bad_amount_warning.value_a == {"raw_value": bad_value}
+
+
+def test_reconciliation_warns_and_excludes_non_finite_amounts(tmp_path) -> None:
+    config = ComparisonConfig(
+        reconciliation_rules=ReconciliationRules(currency_field="currency", amount_field="amount")
+    )
+    store, result = _compare(
+        tmp_path,
+        [{"currency": "USD", "amount": "NaN"}],
+        [],
+        config=config,
+    )
+    try:
+        findings = list(store.iter_differences(comparison_type=ComparisonType.RECONCILIATION))
+    finally:
+        store.close()
+
+    assert result.bad_amounts == 1
+    assert result.totals_file_a["USD"]["amount"] == Decimal("0")
+    assert any("Malformed amount" in item.message for item in findings)
+
+
+def test_reconciliation_rejects_nonzero_amount_without_currency(tmp_path) -> None:
+    config = ComparisonConfig(
+        reconciliation_rules=ReconciliationRules(currency_field="currency", amount_field="amount")
+    )
+    store = DuckDBStore(tmp_path / "missing-currency.duckdb")
+    try:
+        with pytest.raises(ValueError, match="Missing currency"):
+            ReconciliationComparator().compare(store, [{"amount": "1.00"}], [], config=config)
+    finally:
+        store.close()
 
 
 def test_reconciliation_requires_configured_fields_to_exist(tmp_path) -> None:
@@ -248,7 +323,7 @@ def test_reconciliation_checks_cancellation_while_streaming(tmp_path) -> None:
     def cancellation_check() -> None:
         nonlocal calls
         calls += 1
-        if calls == 2:
+        if calls == 3:
             raise RuntimeError("cancelled")
 
     store = DuckDBStore(tmp_path / "cancel.duckdb")
