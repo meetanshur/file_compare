@@ -51,6 +51,7 @@ class ComparisonConfig(BaseModel):
     trim_keys: bool = False
     key_case_sensitive: bool = True
     ignore_fields: list[str] = Field(default_factory=list)
+    null_equals_empty: bool = False
     numeric_tolerance: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
     case_sensitive: bool = True
     whitespace: WhitespaceMode = WhitespaceMode.PRESERVE

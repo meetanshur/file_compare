@@ -1,5 +1,6 @@
 """Deterministic file comparison engines."""
 
+from comparators.fields import FieldComparator, FieldComparisonResult
 from comparators.metadata import MetadataComparator, MetadataComparison, MetadataStatus
 from comparators.raw import (
     RawComparator,
@@ -19,6 +20,8 @@ __all__ = [
     "MetadataComparator",
     "MetadataComparison",
     "MetadataStatus",
+    "FieldComparator",
+    "FieldComparisonResult",
     "RawComparator",
     "RawComparisonResult",
     "RawComparisonStatus",

@@ -82,6 +82,15 @@ findings in memory.
   order-insensitive multisets: differing group sizes and unmatched record
   occurrences are reported with the key and both sides' record data. Duplicate
   keys are not paired arbitrarily or silently skipped.
+- Field comparison stores parser values as text alongside their source type.
+  JSON number tokens retain their original spelling and JSON scalar categories
+  (`string`, `number`, `boolean`, `null`); XLSX values retain the parser's cell
+  category (`string`, `number`, `date`, `boolean`, `blank`, or `formula`).
+  Each exact, ordered typed row is SHA-256 hashed as it is streamed into
+  DuckDB; SQL joins matching keys and reads individual field values only for
+  rows whose hashes differ. Comparison rules such as ignored fields,
+  null-versus-empty, case, and whitespace are applied after that raw row hash,
+  so they cannot conceal changes from the field comparison.
 - JSON array values and YAML documents are materialized one value/document at
   a time; JSON Lines and plain text are processed one line at a time. Fixed-
   width parsing requires configured field widths. Bound the largest record or

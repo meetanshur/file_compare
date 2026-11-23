@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -175,6 +176,37 @@ class DuckDBStore:
             )
             """
         )
+        connection.execute("CREATE SEQUENCE IF NOT EXISTS field_record_id_sequence")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS field_comparison_records (
+                record_id BIGINT PRIMARY KEY DEFAULT nextval('field_record_id_sequence'),
+                side VARCHAR NOT NULL CHECK (side IN ('A', 'B')),
+                record_key JSON NOT NULL,
+                record_key_text VARCHAR NOT NULL,
+                field_order JSON NOT NULL,
+                payload JSON NOT NULL,
+                row_hash VARCHAR NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "ALTER TABLE field_comparison_records ADD COLUMN IF NOT EXISTS row_hash VARCHAR"
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS field_comparison_values (
+                side VARCHAR NOT NULL CHECK (side IN ('A', 'B')),
+                record_id BIGINT NOT NULL,
+                field_name VARCHAR NOT NULL,
+                field_position INTEGER NOT NULL,
+                field_value VARCHAR NOT NULL,
+                comparison_value VARCHAR NOT NULL,
+                data_type VARCHAR NOT NULL,
+                source_type VARCHAR NOT NULL
+            )
+            """
+        )
 
     def _require_connection(self) -> duckdb.DuckDBPyConnection:
         if self._connection is None:
@@ -274,6 +306,404 @@ class DuckDBStore:
                     "permissions."
                 ) from exc
         return inserted
+
+    def reset_field_records(self) -> None:
+        """Clear any prior field-comparison input for this job-scoped store."""
+        with self._lock:
+            try:
+                connection = self._require_connection()
+                connection.execute("DELETE FROM field_comparison_values")
+                connection.execute("DELETE FROM field_comparison_records")
+            except duckdb.Error as exc:
+                raise StorageError("Could not reset field-comparison records.") from exc
+
+    def insert_field_records(
+        self,
+        side: RecordSide,
+        records: Iterable[object],
+        *,
+        key_fields: Sequence[str],
+        trim_keys: bool = False,
+        key_case_sensitive: bool = True,
+        cancellation_check: Callable[[], None] | None = None,
+    ) -> int:
+        """Persist parser field values and type metadata in bounded batches."""
+        if not isinstance(side, RecordSide):
+            raise ValueError("side must be a RecordSide value")
+        if not key_fields:
+            raise ValueError("At least one record key field must be configured")
+
+        inserted = 0
+        record_batch: list[tuple[int, str, str, str, str, str, str]] = []
+        value_batch: list[tuple[str, int, str, int, str, str, str, str]] = []
+        with self._lock:
+            connection = self._require_connection()
+            try:
+                next_id_row = connection.execute(
+                    "SELECT coalesce(max(record_id), 0) + 1 FROM field_comparison_records"
+                ).fetchone()
+                if next_id_row is None:
+                    raise StorageError("Could not allocate a field record identifier.")
+                next_record_id = int(next_id_row[0])
+                for record in records:
+                    if cancellation_check is not None:
+                        cancellation_check()
+                    fields = getattr(record, "fields", None)
+                    if not isinstance(fields, Mapping):
+                        raise TypeError("Field records must expose a fields mapping")
+                    missing_keys = [field for field in key_fields if field not in fields]
+                    if missing_keys:
+                        raise ValueError(f"Record is missing key fields: {', '.join(missing_keys)}")
+                    key: list[list[str]] = []
+                    for field in key_fields:
+                        typed_value = fields[field]
+                        value = str(typed_value.value)
+                        if trim_keys:
+                            value = value.strip()
+                        if not key_case_sensitive:
+                            value = value.casefold()
+                        key.append([field, value])
+                    key_json = _serialize_json(key)
+                    record_id = next_record_id
+                    next_record_id += 1
+                    hash_parts = []
+                    for position, (name, typed_value) in enumerate(fields.items()):
+                        hash_parts.append([name, typed_value.value, typed_value.data_type])
+                        value_batch.append(
+                            (
+                                side.value,
+                                record_id,
+                                name,
+                                position,
+                                typed_value.value,
+                                typed_value.comparison_value,
+                                typed_value.data_type,
+                                typed_value.source_type,
+                            )
+                        )
+                    row_hash = hashlib.sha256(
+                        _serialize_json(hash_parts).encode("utf-8")
+                    ).hexdigest()
+                    record_batch.append(
+                        (
+                            record_id,
+                            side.value,
+                            key_json,
+                            key_json,
+                            _serialize_json(list(fields)),
+                            "{}",
+                            row_hash,
+                        )
+                    )
+                    inserted += 1
+                    if len(record_batch) >= self.batch_size:
+                        self._insert_field_record_batch(record_batch, value_batch)
+                        record_batch.clear()
+                        value_batch.clear()
+                if record_batch:
+                    self._insert_field_record_batch(record_batch, value_batch)
+            except (duckdb.Error, OSError) as exc:
+                raise StorageError(
+                    "Could not persist field records to DuckDB; check free disk space and "
+                    "storage permissions."
+                ) from exc
+        return inserted
+
+    def _insert_field_record_batch(
+        self,
+        record_batch: list[tuple[int, str, str, str, str, str, str]],
+        value_batch: list[tuple[str, int, str, int, str, str, str, str]],
+    ) -> None:
+        connection = self._require_connection()
+        connection.execute("BEGIN TRANSACTION")
+        try:
+            record_appender = connection.appender(
+                "field_comparison_records",
+                columns=[
+                    "record_id",
+                    "side",
+                    "record_key",
+                    "record_key_text",
+                    "field_order",
+                    "payload",
+                    "row_hash",
+                ],
+            )
+            record_appender.append_rows(record_batch)
+            record_appender.flush()
+            value_appender = connection.appender(
+                "field_comparison_values",
+                columns=[
+                    "side",
+                    "record_id",
+                    "field_name",
+                    "field_position",
+                    "field_value",
+                    "comparison_value",
+                    "data_type",
+                    "source_type",
+                ],
+            )
+            value_appender.append_rows(value_batch)
+            value_appender.flush()
+            connection.execute("COMMIT")
+        except duckdb.Error:
+            connection.execute("ROLLBACK")
+            raise
+
+    def create_field_record_indexes(self) -> None:
+        """Create join indexes after field-record ingestion is complete."""
+        with self._lock:
+            try:
+                connection = self._require_connection()
+                connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS field_record_key_idx
+                    ON field_comparison_records (side, record_key_text)
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS field_value_record_idx
+                    ON field_comparison_values (side, record_id, field_name)
+                    """
+                )
+            except duckdb.Error as exc:
+                raise StorageError("Could not index field-comparison records.") from exc
+
+    def iter_field_comparison_differences(
+        self,
+        *,
+        ignore_fields: Sequence[str] = (),
+        null_equals_empty: bool = False,
+        severity: Severity = Severity.ERROR,
+        cancellation_check: Callable[[], None] | None = None,
+        batch_size: int = 1_000,
+    ) -> Iterator[Difference]:
+        """Yield schema and typed-value findings from DuckDB in bounded batches."""
+        if batch_size < 1:
+            raise ValueError("batch_size must be greater than zero")
+        ignored = set(ignore_fields)
+        with self._lock:
+            connection = self._require_connection()
+            try:
+                schemas: dict[str, dict[str, int]] = {"A": {}, "B": {}}
+                schema_cursor = connection.execute(
+                    """
+                    SELECT side, field_name, min(field_position) AS field_position
+                    FROM field_comparison_values
+                    GROUP BY side, field_name
+                    ORDER BY side, field_position
+                    """
+                )
+                while rows := schema_cursor.fetchmany(batch_size):
+                    if cancellation_check is not None:
+                        cancellation_check()
+                    for side, field_name, field_position in rows:
+                        schemas[str(side)][str(field_name)] = int(field_position)
+
+                fields_a = schemas["A"]
+                fields_b = schemas["B"]
+                removed = sorted(
+                    (name, position) for name, position in fields_a.items() if name not in fields_b
+                )
+                added = sorted(
+                    (name, position) for name, position in fields_b.items() if name not in fields_a
+                )
+                added_by_position = {position: name for name, position in added}
+                paired_added: set[str] = set()
+                paired_removed: set[str] = set()
+                for old_name, position in removed:
+                    new_name = added_by_position.get(position)
+                    if new_name is None or old_name in ignored or new_name in ignored:
+                        continue
+                    paired_removed.add(old_name)
+                    paired_added.add(new_name)
+                    yield Difference(
+                        comparison_type=ComparisonType.FIELD,
+                        location=f"schema.position[{position}]",
+                        message=f"Field renamed from {old_name!r} to {new_name!r}",
+                        severity=severity,
+                        value_a={"field": old_name, "position": position},
+                        value_b={"field": new_name, "position": position},
+                    )
+                for name, position in removed:
+                    if name not in paired_removed and name not in ignored:
+                        yield Difference(
+                            comparison_type=ComparisonType.FIELD,
+                            location=f"schema.{name}",
+                            message=f"Field {name!r} was removed from file B",
+                            severity=severity,
+                            value_a={"field": name, "position": position},
+                            value_b=None,
+                        )
+                for name, position in added:
+                    if name not in paired_added and name not in ignored:
+                        yield Difference(
+                            comparison_type=ComparisonType.FIELD,
+                            location=f"schema.{name}",
+                            message=f"Field {name!r} was added in file B",
+                            severity=severity,
+                            value_a=None,
+                            value_b={"field": name, "position": position},
+                        )
+                for name in sorted(fields_a.keys() & fields_b.keys()):
+                    if name not in ignored and fields_a[name] != fields_b[name]:
+                        yield Difference(
+                            comparison_type=ComparisonType.FIELD,
+                            location=f"schema.{name}",
+                            message=(
+                                f"Field {name!r} moved from column {fields_a[name] + 1} "
+                                f"to column {fields_b[name] + 1}"
+                            ),
+                            severity=severity,
+                            value_a={"field": name, "position": fields_a[name]},
+                            value_b={"field": name, "position": fields_b[name]},
+                        )
+
+                comparable_fields = sorted((fields_a.keys() & fields_b.keys()) - ignored)
+                if not comparable_fields:
+                    return
+
+                placeholders = ", ".join("?" for _ in comparable_fields)
+                parameters: list[object] = [*comparable_fields, *comparable_fields]
+                difference_condition = """
+                    a.field_name IS NULL
+                    OR b.field_name IS NULL
+                    OR a.data_type IS DISTINCT FROM b.data_type
+                    OR a.comparison_value IS DISTINCT FROM b.comparison_value
+                """
+                if null_equals_empty:
+                    difference_condition = f"""
+                        ({difference_condition})
+                        AND NOT coalesce((
+                            (a.data_type = 'null' AND b.data_type IN ('string', 'text')
+                                AND b.comparison_value = '')
+                            OR
+                            (b.data_type = 'null' AND a.data_type IN ('string', 'text')
+                                AND a.comparison_value = '')
+                        ), false)
+                    """
+                limit_clause = ""
+                if self.max_total_differences:
+                    limit_clause = "LIMIT ?"
+                    parameters.append(max(1, self.max_total_differences - self._difference_count))
+                connection.execute("DROP TABLE IF EXISTS field_changed_record_pairs")
+                connection.execute(
+                    """
+                    CREATE TEMP TABLE field_changed_record_pairs AS
+                    WITH key_counts AS (
+                        SELECT side, record_key_text, count(*) AS record_count
+                        FROM field_comparison_records
+                        GROUP BY side, record_key_text
+                    ),
+                    unique_a AS (
+                        SELECT r.record_key_text, r.record_id, r.row_hash
+                        FROM field_comparison_records r
+                        JOIN key_counts c USING (side, record_key_text)
+                        WHERE r.side = 'A' AND c.record_count = 1
+                    ),
+                    unique_b AS (
+                        SELECT r.record_key_text, r.record_id, r.row_hash
+                        FROM field_comparison_records r
+                        JOIN key_counts c USING (side, record_key_text)
+                        WHERE r.side = 'B' AND c.record_count = 1
+                    )
+                    SELECT
+                        a.record_key_text,
+                        a.record_id AS record_a,
+                        b.record_id AS record_b
+                    FROM unique_a a
+                    INNER JOIN unique_b b USING (record_key_text)
+                    WHERE a.row_hash IS DISTINCT FROM b.row_hash
+                    """
+                )
+                cursor = connection.execute(
+                    f"""
+                    WITH a_values AS (
+                        SELECT
+                            p.record_key_text,
+                            v.field_name,
+                            v.field_value,
+                            v.comparison_value,
+                            v.data_type,
+                            v.source_type
+                        FROM field_changed_record_pairs p
+                        JOIN field_comparison_values v
+                          ON v.side = 'A' AND v.record_id = p.record_a
+                        WHERE v.field_name IN ({placeholders})
+                    ),
+                    b_values AS (
+                        SELECT
+                            p.record_key_text,
+                            v.field_name,
+                            v.field_value,
+                            v.comparison_value,
+                            v.data_type,
+                            v.source_type
+                        FROM field_changed_record_pairs p
+                        JOIN field_comparison_values v
+                          ON v.side = 'B' AND v.record_id = p.record_b
+                        WHERE v.field_name IN ({placeholders})
+                    )
+                    SELECT
+                        coalesce(a.record_key_text, b.record_key_text) AS record_key_text,
+                        coalesce(a.field_name, b.field_name) AS field_name,
+                        a.field_value AS value_a,
+                        b.field_value AS value_b,
+                        a.data_type AS type_a,
+                        b.data_type AS type_b,
+                        a.source_type AS source_a,
+                        b.source_type AS source_b
+                    FROM a_values a
+                    FULL OUTER JOIN b_values b
+                      ON a.record_key_text = b.record_key_text
+                     AND a.field_name = b.field_name
+                    WHERE {difference_condition}
+                    ORDER BY record_key_text, field_name
+                    {limit_clause}
+                    """,
+                    parameters,
+                )
+                try:
+                    while rows := cursor.fetchmany(batch_size):
+                        if cancellation_check is not None:
+                            cancellation_check()
+                        for (
+                            key_text,
+                            field_name,
+                            value_a,
+                            value_b,
+                            type_a,
+                            type_b,
+                            source_a,
+                            source_b,
+                        ) in rows:
+                            key = json.loads(key_text)
+                            yield Difference(
+                                comparison_type=ComparisonType.FIELD,
+                                location=f"key={_serialize_json(key)} field={field_name}",
+                                message=f"Field {field_name!r} differs in value or data type",
+                                severity=severity,
+                                value_a=None
+                                if type_a is None
+                                else {
+                                    "value": value_a,
+                                    "data_type": type_a,
+                                    "source_type": source_a,
+                                },
+                                value_b=None
+                                if type_b is None
+                                else {
+                                    "value": value_b,
+                                    "data_type": type_b,
+                                    "source_type": source_b,
+                                },
+                            )
+                finally:
+                    connection.execute("DROP TABLE IF EXISTS field_changed_record_pairs")
+            except duckdb.Error as exc:
+                raise StorageError("Could not compare field values in DuckDB.") from exc
 
     def iter_record_comparison_differences(
         self,

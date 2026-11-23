@@ -33,6 +33,10 @@ class StructuredParseError(ValueError):
     """A structured or plain-text source could not be parsed."""
 
 
+class JSONNumber(str):
+    """A JSON number token retaining its exact lexical spelling and numeric type."""
+
+
 @dataclass(frozen=True)
 class StructuredRecord:
     """One parsed JSON or YAML document/value."""
@@ -454,7 +458,7 @@ def _json_error(filename: str | None, exc: json.JSONDecodeError) -> StructuredPa
 
 
 def _json_loads(text: str) -> Any:
-    return json.loads(text, parse_int=str, parse_float=str)
+    return json.loads(text, parse_int=JSONNumber, parse_float=JSONNumber)
 
 
 def _remove_line_terminator(line: str) -> str:
