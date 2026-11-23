@@ -147,6 +147,30 @@ guaranteed to be independent of workbook size. Ensure the temporary directory
 has enough free space and avoid oversized shared-string tables within a
 constrained memory budget. The input stream remains owned by the caller.
 
+## Streaming PDF text lines
+
+`PDFTextParser` uses pypdf to visit pages in document order and yields each
+extracted line as a `PDFTextLine` with a one-based page number and line number.
+It spools input to a temporary file with bounded reads because PDF readers
+require seeking. If no page contains extractable text, parsing raises
+`PDFParseError` with a clear no-text-layer message instead of returning an
+empty result. The parser does not perform OCR; image-only or scanned pages
+therefore do not produce text.
+
+PDF text extraction is not a layout-preserving operation. Column order,
+spacing, tables, reading order, and line breaks may differ from the visual
+page, and each page's extracted text is materialized while that page is
+processed. Use a rendered or raw-byte comparison when layout and exact PDF
+representation matter.
+
+```python
+from parsers.pdf import PDFTextParser
+
+with open("report.pdf", "rb") as stream:
+    for line in PDFTextParser(filename="report.pdf").parse(stream):
+        process(line.page_number, line.line_number, line.text)
+```
+
 ```python
 from parsers.structured import FixedWidthParser, JSONParser, PlainTextParser, YAMLParser
 

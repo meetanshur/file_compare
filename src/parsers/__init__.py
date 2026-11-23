@@ -19,6 +19,7 @@ from parsers.detection import (
     LineEndingCounts,
     detect_file,
 )
+from parsers.pdf import PDFParseError, PDFTextLine, PDFTextParser
 from parsers.structured import (
     FixedWidthField,
     FixedWidthParser,
@@ -51,6 +52,9 @@ __all__ = [
     "LineEndingCounts",
     "ParseWarning",
     "Parser",
+    "PDFParseError",
+    "PDFTextLine",
+    "PDFTextParser",
     "PlainTextParser",
     "StructuredParseError",
     "StructuredRecord",
