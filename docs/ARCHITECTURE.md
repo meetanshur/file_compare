@@ -141,3 +141,13 @@ temporary disk files.
 
 Findings are streamed, so callers should persist or consume them incrementally
 rather than collecting unbounded results.
+
+On Windows with Python 3.13, a three-run comparison of the generated
+`xml_100MB_A.xml` and `xml_100MB_B.xml` fixtures (100,000,000 bytes each)
+verified both fixture hashes and the expected changed-record values in the
+raw finding previews. Median elapsed time was 1.433 seconds, or 133.11 MiB/s
+across both inputs, with a 72.44 MiB peak process working set. The raw report
+contained two 28-byte replaced regions; those regions cover the manifest's
+insert, update, and delete records, which are record-level changes rather than
+three necessarily distinct byte edits. This is a machine- and cache-specific
+measurement, not a performance guarantee.
