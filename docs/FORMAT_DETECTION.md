@@ -84,3 +84,42 @@ with open("input.csv", "rb") as stream:
     for record in parser.parse(stream):
         process(record.values, record.warnings)
 ```
+
+## JSON, YAML, fixed-width, and plain text
+
+The other Step 17 parsers also implement `Parser.parse(binary_source)` and use
+the shared bounded encoding detector. Set `encoding_override` when detection
+is incorrect or when the source's encoding is known. `JSONParser` emits one
+record per value for a top-level JSON array; a top-level object or scalar is a
+single record. Set `json_lines=True` to parse newline-delimited JSON. Array
+parsing holds only one value at a time, so one exceptionally large JSON value
+can still require substantial memory.
+
+`YAMLParser` uses PyYAML's safe, document-at-a-time loader. Each YAML document
+is one record; a single large document is still materialized as one value.
+Unsafe Python object constructors are not enabled.
+
+`FixedWidthParser` requires widths as a sequence or a name-to-width mapping.
+Widths count decoded characters, not bytes. Spaces inside fields are retained.
+Short rows carry a `too_few_characters` warning; extra row text is retained in
+`extra_text` with a `too_many_characters` warning.
+
+`PlainTextParser` yields one physical line per record, including the original
+line terminator and all leading/trailing whitespace. Raw byte comparison
+remains necessary for byte-level encoding and BOM differences.
+
+```python
+from parsers.structured import FixedWidthParser, JSONParser, PlainTextParser, YAMLParser
+
+with open("records.json", "rb") as stream:
+    for record in JSONParser(filename="records.json").parse(stream):
+        process(record.value)
+
+with open("legacy.dat", "rb") as stream:
+    for record in FixedWidthParser(
+        {"account": 8, "amount": 12},
+        filename="legacy.dat",
+        encoding_override="utf-8",
+    ).parse(stream):
+        process(record.values, record.warnings)
+```

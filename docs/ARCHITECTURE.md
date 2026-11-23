@@ -68,6 +68,10 @@ findings in memory.
 - Parsers implement the shared `Parser` protocol and yield records from binary
   streams. CSV/TSV values remain text; malformed row widths are reported on
   individual records, and any extra field text is retained.
+- JSON array values and YAML documents are materialized one value/document at
+  a time; JSON Lines and plain text are processed one line at a time. Fixed-
+  width parsing requires configured field widths. Bound the largest record or
+  document to keep parser memory within the job budget.
 - Do not use whole-file helpers such as `read()`, `read_bytes()`, or
   `read_text()` on comparison inputs. Do not retain all parsed records in
   Python collections.

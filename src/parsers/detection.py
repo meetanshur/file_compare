@@ -25,6 +25,7 @@ class FileFormat(StrEnum):
     XLSX = "xlsx"
     PDF = "pdf"
     YAML = "yaml"
+    FIXED_WIDTH = "fixed_width"
     TEXT = "text"
     BINARY = "binary"
     UNKNOWN = "unknown"
@@ -90,6 +91,9 @@ _EXTENSION_FORMATS = {
     ".pdf": FileFormat.PDF,
     ".yaml": FileFormat.YAML,
     ".yml": FileFormat.YAML,
+    ".fwf": FileFormat.FIXED_WIDTH,
+    ".fixed": FileFormat.FIXED_WIDTH,
+    ".fixedwidth": FileFormat.FIXED_WIDTH,
     ".txt": FileFormat.TEXT,
     ".text": FileFormat.TEXT,
     ".log": FileFormat.TEXT,

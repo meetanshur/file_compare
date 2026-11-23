@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import csv
-import io
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,8 +12,8 @@ from parsers.base import Parser
 from parsers.detection import (
     DEFAULT_SAMPLE_SIZE_BYTES,
     FileFormat,
-    detect_file,
 )
+from parsers.text_stream import detach_text_stream, open_detected_text
 
 
 class DelimitedParseError(ValueError):
@@ -66,37 +65,32 @@ class DelimitedTextParser(Parser[DelimitedRecord]):
 
     def parse(self, source: BinaryIO) -> Iterator[DelimitedRecord]:
         """Yield rows from a binary source using detected or overridden settings."""
-        sample = source.read(self.sample_size_bytes)
-        detection = detect_file(
-            sample,
-            self.filename,
-            sample_size_bytes=self.sample_size_bytes,
-        )
-        file_format = self.format_override or detection.file_format
-        if file_format not in {FileFormat.CSV, FileFormat.TSV}:
-            raise DelimitedParseError(
-                f"Expected CSV or TSV input, detected {file_format.value!r}; "
-                "provide format_override to force delimited parsing"
-            )
-
-        encoding = self.encoding_override or detection.encoding
-        if encoding is None:
-            raise DelimitedParseError("Could not detect a text encoding; provide encoding_override")
         try:
-            reader, text_stream = _create_reader(
+            text_stream, detection = open_detected_text(
                 source,
-                sample,
-                encoding=encoding,
-                delimiter=self.delimiter or _delimiter_for(file_format),
+                filename=self.filename,
+                encoding_override=self.encoding_override,
+                sample_size_bytes=self.sample_size_bytes,
             )
-        except (LookupError, UnicodeError) as exc:
-            raise DelimitedParseError(f"Unsupported or invalid text encoding {encoding!r}") from exc
-
+        except (TypeError, ValueError) as exc:
+            raise DelimitedParseError(str(exc)) from exc
         try:
+            file_format = self.format_override or detection.file_format
+            if file_format not in {FileFormat.CSV, FileFormat.TSV}:
+                raise DelimitedParseError(
+                    f"Expected CSV or TSV input, detected {file_format.value!r}; "
+                    "provide format_override to force delimited parsing"
+                )
+            reader = csv.reader(
+                text_stream,
+                delimiter=self.delimiter or _delimiter_for(file_format),
+                strict=True,
+            )
             yield from self._iter_records(reader)
         except UnicodeDecodeError as exc:
             raise DelimitedParseError(
-                f"Could not decode {self.filename or 'delimited source'} using {encoding!r}: {exc}"
+                f"Could not decode {self.filename or 'delimited source'} "
+                f"using {text_stream.encoding!r}: {exc}"
             ) from exc
         except csv.Error as exc:
             raise DelimitedParseError(
@@ -104,7 +98,7 @@ class DelimitedTextParser(Parser[DelimitedRecord]):
                 f"near physical line {reader.line_num}: {exc}"
             ) from exc
         finally:
-            _detach_text_stream(text_stream)
+            detach_text_stream(text_stream)
 
     def _iter_records(self, reader: csv.reader) -> Iterator[DelimitedRecord]:
         try:
@@ -178,61 +172,6 @@ class TSVParser(DelimitedTextParser):
             has_header=has_header,
             sample_size_bytes=sample_size_bytes,
         )
-
-
-class _PrefixedReader(io.RawIOBase):
-    """Replay the detection sample before continuing from the original stream."""
-
-    def __init__(self, prefix: bytes, source: BinaryIO) -> None:
-        super().__init__()
-        self._prefix = memoryview(prefix)
-        self._offset = 0
-        self._source = source
-
-    def readable(self) -> bool:
-        return True
-
-    def readinto(self, buffer: bytearray | memoryview) -> int:
-        if self.closed:
-            raise ValueError("I/O operation on closed parser stream")
-        view = memoryview(buffer)
-        written = 0
-        if self._offset < len(self._prefix):
-            written = min(len(view), len(self._prefix) - self._offset)
-            view[:written] = self._prefix[self._offset : self._offset + written]
-            self._offset += written
-        if written < len(view):
-            chunk = self._source.read(len(view) - written)
-            if not isinstance(chunk, bytes):
-                raise TypeError("parser source streams must return bytes")
-            view[written : written + len(chunk)] = chunk
-            written += len(chunk)
-        return written
-
-
-def _create_reader(
-    source: BinaryIO,
-    sample: bytes,
-    *,
-    encoding: str,
-    delimiter: str,
-) -> tuple[csv.reader, io.TextIOWrapper]:
-    raw_reader = _PrefixedReader(sample, source)
-    buffered = io.BufferedReader(raw_reader)
-    text_stream = io.TextIOWrapper(buffered, encoding=encoding, newline="")
-    return csv.reader(text_stream, delimiter=delimiter, strict=True), text_stream
-
-
-def _detach_text_stream(text_stream: io.TextIOWrapper) -> None:
-    try:
-        buffered = text_stream.detach()
-    except (AttributeError, ValueError):
-        return
-    try:
-        raw_stream = buffered.detach()
-    except (AttributeError, ValueError):
-        return
-    raw_stream.close()
 
 
 def _normalize_format(value: FileFormat | str | None) -> FileFormat | None:
