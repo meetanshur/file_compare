@@ -1,0 +1,6 @@
+provider: openai
+model: gpt-4o-mini
+api_key_env: OPENAI_API_KEY
+timeout_seconds: 30
+max_retries: 2
+max_output_tokens: 2048
