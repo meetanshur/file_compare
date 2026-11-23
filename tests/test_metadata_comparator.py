@@ -4,6 +4,8 @@ import hashlib
 from datetime import UTC, datetime, timedelta, timezone
 from io import BytesIO
 
+import pytest
+
 from comparators import MetadataComparator, MetadataStatus, RawComparator
 from connectors.base import SourceMetadata
 
@@ -97,6 +99,29 @@ def test_metadata_comparator_compares_chunked_md5_and_sha256() -> None:
         assert item.value_b == hash_function(payload_b).hexdigest()
     assert max(source_a.requested_sizes) == 17
     assert max(source_b.requested_sizes) == 17
+
+
+def test_metadata_checksum_loop_checks_job_cancellation() -> None:
+    checks = 0
+
+    def cancel_after_two_chunks() -> None:
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            raise RuntimeError("cancelled")
+
+    with pytest.raises(RuntimeError, match="cancelled"):
+        list(
+            MetadataComparator(chunk_size=4).compare(
+                _metadata(),
+                _metadata(),
+                source_a=BytesIO(b"large data"),
+                source_b=BytesIO(b"large data"),
+                cancellation_check=cancel_after_two_chunks,
+            )
+        )
+
+    assert checks == 2
 
 
 def test_metadata_comparator_reuses_raw_comparison_checksums() -> None:

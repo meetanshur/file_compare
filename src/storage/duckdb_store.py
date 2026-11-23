@@ -1291,6 +1291,38 @@ class DuckDBStore:
             except duckdb.Error as exc:
                 raise StorageError("Could not read stored findings.") from exc
 
+    def iter_differences_with_ids(
+        self,
+        *,
+        comparison_type: ComparisonType | None = None,
+        offset: int = 0,
+        limit: int = 1_000,
+    ) -> Iterator[tuple[int, Difference]]:
+        """Yield stable persisted finding IDs with a bounded page of findings."""
+        if offset < 0 or limit < 0:
+            raise ValueError("offset and limit must be zero or greater")
+        if limit > 10_000:
+            raise ValueError("finding page limit must not exceed 10000")
+
+        with self._lock:
+            try:
+                connection = self._require_connection()
+                query = "SELECT difference_id, payload FROM comparison_differences"
+                parameters: list[Any] = []
+                if comparison_type is not None:
+                    query += " WHERE json_extract_string(payload, '$.comparison_type') = ?"
+                    parameters.append(comparison_type.value)
+                query += " ORDER BY difference_id"
+                query += " LIMIT ?"
+                parameters.append(limit)
+                if offset:
+                    query += " OFFSET ?"
+                    parameters.append(offset)
+                for difference_id, payload in connection.execute(query, parameters).fetchall():
+                    yield int(difference_id), Difference.model_validate_json(payload)
+            except duckdb.Error as exc:
+                raise StorageError("Could not read stored findings.") from exc
+
     def close(self) -> None:
         """Close the database connection."""
         with self._lock:

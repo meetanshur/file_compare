@@ -46,6 +46,18 @@ network failures, rate limits, and retryable server responses. Credentials are
 redacted in config representations and provider failures never include
 untrusted SDK exception text.
 
+`ComparisonAgent` runs the enabled deterministic comparators through the job
+context and persists their findings in DuckDB before requesting optional AI
+outputs. The model cannot select or change comparison results. Explanations
+receive aggregate counts and a bounded page of findings with stable IDs; they
+must cite supplied IDs and are labelled `AI-generated`. Model failures leave
+the deterministic result intact and mark only the explanation unavailable.
+Config proposals are kept pending until an explicit approval call. Model input
+is bounded by `max_explanation_findings`, `max_explanation_chars`,
+`max_sample_records`, and `max_sample_chars`; `mask_sample_digits` masks digits
+in sample values and explanation finding values before submission. The
+`max_request_text_chars` provider limit remains an additional final guard.
+
 ## Resource defaults
 
 | Setting | Default | Meaning |

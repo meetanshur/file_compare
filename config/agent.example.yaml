@@ -5,3 +5,9 @@ timeout_seconds: 30
 max_retries: 2
 max_output_tokens: 2048
 max_request_text_chars: 12000
+max_explanation_findings: 20
+max_explanation_chars: 8000
+max_sample_records: 5
+max_sample_chars: 2000
+mask_sample_digits: true
+enable_config_proposals: true

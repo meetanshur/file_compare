@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -47,6 +47,7 @@ class MetadataComparator:
         source_a: BinaryIO | None = None,
         source_b: BinaryIO | None = None,
         raw_comparison: RawComparisonResult | None = None,
+        cancellation_check: Callable[[], None] | None = None,
     ) -> Iterator[MetadataComparison]:
         """Yield metadata outcomes; missing values are unavailable, not differences.
 
@@ -81,9 +82,9 @@ class MetadataComparator:
         missing_a = [name for name in ("md5", "sha256") if name not in checksums_a]
         missing_b = [name for name in ("md5", "sha256") if name not in checksums_b]
         if source_a is not None and missing_a:
-            checksums_a.update(_checksums(source_a, missing_a, self.chunk_size))
+            checksums_a.update(_checksums(source_a, missing_a, self.chunk_size, cancellation_check))
         if source_b is not None and missing_b:
-            checksums_b.update(_checksums(source_b, missing_b, self.chunk_size))
+            checksums_b.update(_checksums(source_b, missing_b, self.chunk_size, cancellation_check))
 
         for algorithm in ("md5", "sha256"):
             digest_a = checksums_a.get(algorithm)
@@ -99,12 +100,19 @@ def _normalized_checksums(checksums: Mapping[str, str]) -> dict[str, str]:
     return {name.lower(): value.lower() for name, value in checksums.items()}
 
 
-def _checksums(source: BinaryIO, algorithms: list[str], chunk_size: int) -> dict[str, str]:
+def _checksums(
+    source: BinaryIO,
+    algorithms: list[str],
+    chunk_size: int,
+    cancellation_check: Callable[[], None] | None,
+) -> dict[str, str]:
     digests = {
         algorithm: (hashlib.md5(usedforsecurity=False) if algorithm == "md5" else hashlib.sha256())
         for algorithm in algorithms
     }
     while chunk := source.read(chunk_size):
+        if cancellation_check is not None:
+            cancellation_check()
         if not isinstance(chunk, bytes):
             raise TypeError("comparison sources must return bytes")
         for digest in digests.values():
