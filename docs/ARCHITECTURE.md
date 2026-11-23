@@ -4,6 +4,29 @@ This document defines the memory and data-flow rules for comparisons. The
 defaults are initial operational limits; later implementation steps must expose
 and validate them as application configuration.
 
+## Comparison rules
+
+`ComparisonConfig` is the validated YAML/JSON source for comparison rules.
+`strictness: strict` preserves exact parsed values by default. `strictness:
+lenient` selects lenient defaults (trim whitespace, case-insensitive text,
+null equals empty, ignore XML sibling order, equal supported dates compare
+equal, and a 0.01 numeric tolerance); explicitly set fields override those
+preset values. The `field_overrides` map accepts exact names or simple glob
+patterns and may override ignore, null/empty, case, whitespace, date, and
+numeric-tolerance behavior for matching fields. `ignore_fields` likewise
+accepts names and glob patterns.
+
+Shared rule resolution and value comparison live in
+`common/comparison_rules.py` and are used by record, field, financial, and
+reconciliation comparison. The raw comparator remains byte-exact under every
+preset: semantic field rules cannot safely erase or normalize bytes without
+violating the raw comparison contract. XML schema comparison honors the
+`ignore_element_order` rule. Supported date formats are explicitly configured
+with `date_formats`; dates remain text comparisons unless
+`treat_equal_dates_as_same` is enabled. Financial checks are separately
+configured with `financial_rules` and report currency, amount, precision, and
+sign findings.
+
 ## Resource defaults
 
 | Setting | Default | Meaning |

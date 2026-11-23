@@ -17,6 +17,7 @@ from uuid import UUID, uuid4
 import duckdb
 
 from common.comparison_result import ComparisonType, Difference, Severity
+from common.comparison_rules import ComparisonRules
 
 
 class StorageError(RuntimeError):
@@ -248,6 +249,7 @@ class DuckDBStore:
         key_fields: Sequence[str] = (),
         trim_keys: bool = False,
         key_case_sensitive: bool = True,
+        comparison_transform: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
         cancellation_check: Callable[[], None] | None = None,
     ) -> int:
         """Persist a record stream in bounded batches and return its row count."""
@@ -279,6 +281,8 @@ class DuckDBStore:
                                     value = value.casefold()
                             key.append([field, value])
                             comparison_record[field] = value
+                    if comparison_transform is not None:
+                        comparison_record = dict(comparison_transform(comparison_record))
                     key_json = None if key is None else _serialize_json(key)
                     payload_json = _serialize_json(record)
                     comparison_payload_json = (
@@ -474,8 +478,7 @@ class DuckDBStore:
     def iter_field_comparison_differences(
         self,
         *,
-        ignore_fields: Sequence[str] = (),
-        null_equals_empty: bool = False,
+        comparison_rules: ComparisonRules | None = None,
         severity: Severity = Severity.ERROR,
         cancellation_check: Callable[[], None] | None = None,
         batch_size: int = 1_000,
@@ -483,7 +486,7 @@ class DuckDBStore:
         """Yield schema and typed-value findings from DuckDB in bounded batches."""
         if batch_size < 1:
             raise ValueError("batch_size must be greater than zero")
-        ignored = set(ignore_fields)
+        rules = comparison_rules
         with self._lock:
             connection = self._require_connection()
             try:
@@ -504,6 +507,11 @@ class DuckDBStore:
 
                 fields_a = schemas["A"]
                 fields_b = schemas["B"]
+                ignored = {
+                    name
+                    for name in fields_a.keys() | fields_b.keys()
+                    if rules is not None and rules.is_ignored(name)
+                }
                 removed = sorted(
                     (name, position) for name, position in fields_a.items() if name not in fields_b
                 )
@@ -567,23 +575,6 @@ class DuckDBStore:
 
                 placeholders = ", ".join("?" for _ in comparable_fields)
                 parameters: list[object] = [*comparable_fields, *comparable_fields]
-                difference_condition = """
-                    a.field_name IS NULL
-                    OR b.field_name IS NULL
-                    OR a.data_type IS DISTINCT FROM b.data_type
-                    OR a.comparison_value IS DISTINCT FROM b.comparison_value
-                """
-                if null_equals_empty:
-                    difference_condition = f"""
-                        ({difference_condition})
-                        AND NOT coalesce((
-                            (a.data_type = 'null' AND b.data_type IN ('string', 'text')
-                                AND b.comparison_value = '')
-                            OR
-                            (b.data_type = 'null' AND a.data_type IN ('string', 'text')
-                                AND a.comparison_value = '')
-                        ), false)
-                    """
                 limit_clause = ""
                 if self.max_total_differences:
                     limit_clause = "LIMIT ?"
@@ -659,7 +650,6 @@ class DuckDBStore:
                     FULL OUTER JOIN b_values b
                       ON a.record_key_text = b.record_key_text
                      AND a.field_name = b.field_name
-                    WHERE {difference_condition}
                     ORDER BY record_key_text, field_name
                     {limit_clause}
                     """,
@@ -679,6 +669,32 @@ class DuckDBStore:
                             source_a,
                             source_b,
                         ) in rows:
+                            if rules is not None and type_a is not None and type_b is not None:
+                                is_date_format_difference = rules.is_date_format_difference(
+                                    str(value_a), str(value_b)
+                                )
+                                if is_date_format_difference:
+                                    yield Difference(
+                                        comparison_type=ComparisonType.FIELD,
+                                        location=(
+                                            f"key={_serialize_json(json.loads(key_text))} "
+                                            f"field={field_name}"
+                                        ),
+                                        message=f"Date format differs for field {field_name!r}",
+                                        severity=severity,
+                                        value_a=value_a,
+                                        value_b=value_b,
+                                    )
+                                    if rules.option(str(field_name), "treat_equal_dates_as_same"):
+                                        continue
+                                if rules.equal_values(
+                                    str(field_name),
+                                    str(value_a),
+                                    str(value_b),
+                                    type_a=str(type_a),
+                                    type_b=str(type_b),
+                                ):
+                                    continue
                             key = json.loads(key_text)
                             yield Difference(
                                 comparison_type=ComparisonType.FIELD,
@@ -709,6 +725,7 @@ class DuckDBStore:
         self,
         *,
         cancellation_check: Callable[[], None] | None = None,
+        comparison_rules: ComparisonRules | None = None,
         batch_size: int = 1_000,
     ) -> Iterator[Difference]:
         """Yield SQL-joined differences, including order-insensitive duplicate-group checks."""
@@ -801,12 +818,15 @@ class DuckDBStore:
                         SELECT
                             side,
                             record_key_text,
-                            CAST(payload AS VARCHAR) AS payload_text,
-                            payload,
+                            CAST(coalesce(comparison_payload, payload) AS VARCHAR) AS payload_text,
+                            any_value(payload) AS payload,
                             count(*) AS record_count
                         FROM comparison_records
                         WHERE record_key_text IN (SELECT record_key_text FROM duplicate_keys)
-                        GROUP BY side, record_key_text, CAST(payload AS VARCHAR), payload
+                        GROUP BY
+                            side,
+                            record_key_text,
+                            CAST(coalesce(comparison_payload, payload) AS VARCHAR)
                     ),
                     duplicate_record_findings AS (
                         SELECT
@@ -949,6 +969,12 @@ class DuckDBStore:
                             value_a = json.loads(value_a)
                         if isinstance(value_b, str):
                             value_b = json.loads(value_b)
+                        if (
+                            category is ComparisonType.UPDATE
+                            and comparison_rules is not None
+                            and comparison_rules.records_equal(value_a, value_b)
+                        ):
+                            continue
                         message = {
                             ComparisonType.INSERT: "Record exists only in file B",
                             ComparisonType.UPDATE: "Record fields differ",

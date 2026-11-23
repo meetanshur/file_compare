@@ -9,6 +9,7 @@ from decimal import Decimal
 from typing import Any
 
 from common.comparison_config import ComparisonConfig
+from common.comparison_rules import ComparisonRules
 from parsers.structured import StructuredRecord
 from parsers.xlsx import XLSXCellValue
 from parsers.xml import XmlElement, XmlRecord
@@ -44,6 +45,7 @@ class RecordComparator:
         if not keys:
             raise ValueError("At least one record key field must be configured")
         normalize_keys = config.trim_keys if trim_keys is None and config else bool(trim_keys)
+        comparison_rules = ComparisonRules(config) if config is not None else None
         match_case = (
             config.key_case_sensitive
             if key_case_sensitive is None and config
@@ -56,6 +58,9 @@ class RecordComparator:
             key_fields=keys,
             trim_keys=normalize_keys,
             key_case_sensitive=match_case,
+            comparison_transform=(
+                comparison_rules.normalize_record if comparison_rules is not None else None
+            ),
             cancellation_check=cancellation_check,
         )
         count_b = store.insert_records(
@@ -64,13 +69,19 @@ class RecordComparator:
             key_fields=keys,
             trim_keys=normalize_keys,
             key_case_sensitive=match_case,
+            comparison_transform=(
+                comparison_rules.normalize_record if comparison_rules is not None else None
+            ),
             cancellation_check=cancellation_check,
         )
         if cancellation_check is not None:
             cancellation_check()
         store.create_record_key_index()
         differences = store.insert_differences(
-            store.iter_record_comparison_differences(cancellation_check=cancellation_check)
+            store.iter_record_comparison_differences(
+                cancellation_check=cancellation_check,
+                comparison_rules=comparison_rules,
+            )
         )
         return RecordComparisonResult(count_a, count_b, differences)
 

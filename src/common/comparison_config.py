@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 
 class WhitespaceMode(StrEnum):
@@ -25,6 +27,19 @@ class Strictness(StrEnum):
 
     STRICT = "strict"
     LENIENT = "lenient"
+
+
+class FieldRuleOverride(BaseModel):
+    """Optional rule overrides for one field name or glob pattern."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ignore: bool | None = None
+    null_equals_empty: bool | None = None
+    case_sensitive: bool | None = None
+    whitespace: WhitespaceMode | None = None
+    numeric_tolerance: Decimal | None = Field(default=None, ge=Decimal("0"))
+    treat_equal_dates_as_same: bool | None = None
 
 
 class ComparisonLevels(BaseModel):
@@ -59,6 +74,17 @@ class ReconciliationRules(BaseModel):
         return self
 
 
+class FinancialRules(BaseModel):
+    """Fields used for row-level financial checks."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    currency_field: str | None = Field(default=None, min_length=1)
+    amount_field: str | None = Field(default=None, min_length=1)
+    check_decimal_precision: bool = True
+    check_sign: bool = True
+
+
 class ComparisonConfig(BaseModel):
     """Rules used to configure a deterministic file comparison."""
 
@@ -68,15 +94,60 @@ class ComparisonConfig(BaseModel):
     max_total_differences: int = Field(default=1_000_000, ge=0)
     levels: ComparisonLevels = Field(default_factory=ComparisonLevels)
     record_key: list[str] = Field(default_factory=list)
+    financial_rules: FinancialRules = Field(default_factory=FinancialRules)
     reconciliation_rules: ReconciliationRules = Field(default_factory=ReconciliationRules)
     trim_keys: bool = False
     key_case_sensitive: bool = True
     ignore_fields: list[str] = Field(default_factory=list)
+    field_overrides: dict[str, FieldRuleOverride] = Field(default_factory=dict)
     null_equals_empty: bool = False
     numeric_tolerance: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
     case_sensitive: bool = True
     whitespace: WhitespaceMode = WhitespaceMode.PRESERVE
     strictness: Strictness = Strictness.STRICT
+    ignore_element_order: bool = False
+    date_formats: list[str] = Field(default_factory=lambda: ["%Y-%m-%d", "%d/%m/%Y"])
+    treat_equal_dates_as_same: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def apply_lenient_preset_defaults(cls, data: Any) -> Any:
+        if not isinstance(data, dict) or data.get("strictness") != Strictness.LENIENT:
+            return data
+        data = dict(data)
+        defaults = {
+            "null_equals_empty": True,
+            "case_sensitive": False,
+            "whitespace": WhitespaceMode.TRIM,
+            "ignore_element_order": True,
+            "treat_equal_dates_as_same": True,
+        }
+        for key, value in defaults.items():
+            data.setdefault(key, value)
+        data.setdefault("numeric_tolerance", Decimal("0.01"))
+        return data
+
+    @model_validator(mode="after")
+    def validate_date_formats(self) -> ComparisonConfig:
+        for index, date_format in enumerate(self.date_formats):
+            try:
+                sample = datetime(2001, 2, 3).strftime(date_format)
+                datetime.strptime(sample, date_format)
+            except ValueError as exc:
+                raise ValueError(f"date_formats.{index} is not a valid format string") from exc
+        return self
+
+    def field_override(self, field_name: str) -> FieldRuleOverride | None:
+        """Return the most specific matching field override, if any."""
+        exact = self.field_overrides.get(field_name)
+        if exact is not None:
+            return exact
+        matches = [
+            (pattern.count("*") + pattern.count("?"), pattern, override)
+            for pattern, override in self.field_overrides.items()
+            if any(character in pattern for character in "*?[") and fnmatchcase(field_name, pattern)
+        ]
+        return min(matches, default=(0, "", None))[2]
 
 
 def load_comparison_config(path: str | Path) -> ComparisonConfig:
@@ -92,4 +163,11 @@ def load_comparison_config(path: str | Path) -> ComparisonConfig:
     else:
         raise ValueError(f"Unsupported configuration file extension: {suffix or '(none)'}")
 
-    return ComparisonConfig.model_validate(data)
+    try:
+        return ComparisonConfig.model_validate(data)
+    except ValidationError as exc:
+        details = "; ".join(
+            f"{'.'.join(str(part) for part in error['loc']) or '<root>'}: {error['msg']}"
+            for error in exc.errors()
+        )
+        raise ValueError(f"Invalid comparison config: {details}") from exc

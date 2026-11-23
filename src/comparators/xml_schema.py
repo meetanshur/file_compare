@@ -8,7 +8,9 @@ from typing import BinaryIO
 
 from lxml import etree
 
+from common.comparison_config import ComparisonConfig
 from common.comparison_result import ComparisonType, Difference, Severity
+from common.comparison_rules import ComparisonRules
 from parsers.xml import XmlElement, XmlRecord
 
 
@@ -26,6 +28,7 @@ class XMLSchemaComparator:
         *,
         cancellation_check: Callable[[], None] | None = None,
         max_total_differences: int = 0,
+        config: ComparisonConfig | None = None,
     ) -> Iterator[Difference]:
         """Yield tag, hierarchy, attribute-name, and element-order differences.
 
@@ -37,6 +40,7 @@ class XMLSchemaComparator:
 
         missing = object()
         difference_count = 0
+        ignore_order = ComparisonRules(config).ignores_element_order if config else False
         for index, (record_a, record_b) in enumerate(
             zip_longest(records_a, records_b, fillvalue=missing),
             start=1,
@@ -66,6 +70,7 @@ class XMLSchemaComparator:
                     record_b.element,
                     f"/record[{index}]",
                     cancellation_check,
+                    ignore_order,
                 ):
                     if max_total_differences and difference_count >= max_total_differences:
                         return
@@ -121,6 +126,7 @@ def _compare_elements(
     element_b: XmlElement,
     path: str,
     cancellation_check: Callable[[], None] | None,
+    ignore_element_order: bool = False,
 ) -> Iterator[Difference]:
     stack: list[tuple[XmlElement, XmlElement, str]] = [(element_a, element_b, path)]
     while stack:
@@ -153,11 +159,18 @@ def _compare_elements(
 
         children_a = current_a.children
         children_b = current_b.children
+        if ignore_element_order:
+            children_a = tuple(sorted(children_a, key=lambda child: child.tag))
+            children_b = tuple(sorted(children_b, key=lambda child: child.tag))
         common_count = min(len(children_a), len(children_b))
         for child_index in range(common_count - 1, -1, -1):
             child_a = children_a[child_index]
             child_b = children_b[child_index]
-            child_path = f"{current_path}/element[{child_index + 1}]"
+            child_path = (
+                f"{current_path}/{child_a.tag}[{child_index + 1}]"
+                if ignore_element_order
+                else f"{current_path}/element[{child_index + 1}]"
+            )
             stack.append((child_a, child_b, child_path))
         for child_index in range(common_count, len(children_a)):
             child = children_a[child_index]

@@ -11,9 +11,9 @@ from common.comparison_config import (
     ComparisonConfig,
     ReconciliationRules,
     Strictness,
-    WhitespaceMode,
 )
 from common.comparison_result import ComparisonType, Difference, Severity
+from common.comparison_rules import ComparisonRules
 from comparators.records import parser_record_to_text_mapping
 from parsers.xlsx import XLSXCellValue
 from storage.duckdb_store import DuckDBStore, PersistResult
@@ -60,7 +60,12 @@ class ReconciliationComparator:
         """Compare record counts and configured currency-wise monetary totals."""
         effective = config or ComparisonConfig()
         rules = effective.reconciliation_rules
-        fields = _configured_fields(rules)
+        comparison_rules = ComparisonRules(effective)
+        fields = {
+            field_name
+            for field_name in _configured_fields(rules)
+            if not comparison_rules.is_ignored(field_name)
+        }
         pending_warnings: list[Difference] = []
 
         def persist_bad_amount_warning(warning: Difference) -> None:
@@ -70,10 +75,22 @@ class ReconciliationComparator:
                 pending_warnings.clear()
 
         side_a = _aggregate_records(
-            records_a, "A", rules, effective, cancellation_check, persist_bad_amount_warning
+            records_a,
+            "A",
+            rules,
+            effective,
+            comparison_rules,
+            cancellation_check,
+            persist_bad_amount_warning,
         )
         side_b = _aggregate_records(
-            records_b, "B", rules, effective, cancellation_check, persist_bad_amount_warning
+            records_b,
+            "B",
+            rules,
+            effective,
+            comparison_rules,
+            cancellation_check,
+            persist_bad_amount_warning,
         )
         if pending_warnings:
             store.insert_differences(pending_warnings)
@@ -89,7 +106,9 @@ class ReconciliationComparator:
             cancellation_check()
 
         differences = store.insert_differences(
-            _reconciliation_differences(side_a, side_b, effective, cancellation_check)
+            _reconciliation_differences(
+                side_a, side_b, effective, comparison_rules, cancellation_check
+            )
         )
         return ReconciliationComparisonResult(
             records_file_a=side_a.record_count,
@@ -120,6 +139,7 @@ def _aggregate_records(
     side: str,
     rules: ReconciliationRules,
     config: ComparisonConfig,
+    comparison_rules: ComparisonRules,
     cancellation_check: Callable[[], None] | None,
     bad_amount_callback: Callable[[Difference], None],
 ) -> _SideTotals:
@@ -131,9 +151,13 @@ def _aggregate_records(
             ("debit", rules.debit_field),
             ("credit", rules.credit_field),
         )
-        if field_name is not None
+        if field_name is not None and not comparison_rules.is_ignored(field_name)
     }
-    configured_fields = _configured_fields(rules)
+    configured_fields = {
+        field_name
+        for field_name in _configured_fields(rules)
+        if not comparison_rules.is_ignored(field_name)
+    }
 
     iterator = iter(records)
     while True:
@@ -156,7 +180,7 @@ def _aggregate_records(
             if rules.currency_field is not None:
                 raw_currency = values.get(rules.currency_field, "")
                 if raw_currency.strip():
-                    currency = _normalize_currency(raw_currency, config)
+                    currency = comparison_rules.normalize_text(raw_currency, rules.currency_field)
 
             metric_values: dict[str, Decimal] = {}
             for metric, field_name in metric_fields.items():
@@ -247,14 +271,6 @@ def _text(value: Any) -> str:
     return str(value)
 
 
-def _normalize_currency(currency: str, config: ComparisonConfig) -> str:
-    if config.whitespace is WhitespaceMode.TRIM:
-        currency = currency.strip()
-    elif config.whitespace is WhitespaceMode.COLLAPSE:
-        currency = " ".join(currency.split())
-    return currency if config.case_sensitive else currency.casefold()
-
-
 def _add_exact(left: Decimal, right: Decimal) -> Decimal:
     """Add finite Decimals without rounding under the process-wide context."""
     left_tuple = left.as_tuple()
@@ -271,6 +287,7 @@ def _reconciliation_differences(
     side_a: _SideTotals,
     side_b: _SideTotals,
     config: ComparisonConfig,
+    rules: ComparisonRules,
     cancellation_check: Callable[[], None] | None,
 ) -> Iterable[Difference]:
     severity = Severity.ERROR if config.strictness is Strictness.STRICT else Severity.WARNING
@@ -287,6 +304,11 @@ def _reconciliation_differences(
         )
 
     currencies = sorted(set(side_a.totals) | set(side_b.totals))
+    metric_fields = {
+        "amount": config.reconciliation_rules.amount_field,
+        "debit": config.reconciliation_rules.debit_field,
+        "credit": config.reconciliation_rules.credit_field,
+    }
     for currency in currencies:
         metrics = sorted(
             set(side_a.totals.get(currency, {})) | set(side_b.totals.get(currency, {}))
@@ -296,7 +318,10 @@ def _reconciliation_differences(
                 cancellation_check()
             total_a = side_a.totals.get(currency, {}).get(metric, Decimal(0))
             total_b = side_b.totals.get(currency, {}).get(metric, Decimal(0))
-            if abs(_add_exact(total_a, total_b.copy_negate())) <= config.numeric_tolerance:
+            field_name = metric_fields[metric]
+            if field_name is not None and rules.equal_numbers(
+                field_name, str(total_a), str(total_b)
+            ):
                 continue
             yield Difference(
                 comparison_type=ComparisonType.RECONCILIATION,
