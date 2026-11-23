@@ -58,6 +58,15 @@ is bounded by `max_explanation_findings`, `max_explanation_chars`,
 in sample values and explanation finding values before submission. The
 `max_request_text_chars` provider limit remains an additional final guard.
 
+## Minimal UI and exports
+
+Run the local interface with `streamlit run src/ui/app.py`. Enter host-local
+paths or `s3://bucket/key` URIs; browser uploads are not used. Configure S3
+credentials through the standard AWS credential chain and configure
+`OPENAI_API_KEY` to enable AI explanations. Findings can be paged and exported
+as streaming CSV or JSONL; each export includes truncation and explanation-label
+metadata. Export downloads are prepared on demand using a disk-spilling buffer.
+
 ## Resource defaults
 
 | Setting | Default | Meaning |

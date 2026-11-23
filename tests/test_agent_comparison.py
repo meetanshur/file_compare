@@ -59,6 +59,10 @@ class _JobContext:
     def raise_if_cancelled() -> None:
         return None
 
+    @staticmethod
+    def report_progress(rows_processed: int, total_rows: int | None = None) -> None:
+        return None
+
 
 def _source(uri: str, name: str, payload: bytes) -> ComparisonSource:
     metadata = SourceMetadata(

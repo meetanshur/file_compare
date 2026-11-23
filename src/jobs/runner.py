@@ -229,10 +229,10 @@ class ComparisonJobRunner:
                 result = state.worker(context)
                 context.raise_if_cancelled()
                 final_status = JobStatus.TRUNCATED if store.truncated else JobStatus.COMPLETED
-                with self._lock:
-                    state.result = result
-                    state.status = final_status
-                    state.finished_at = datetime.now(UTC)
+            with self._lock:
+                state.result = result
+                state.status = final_status
+                state.finished_at = datetime.now(UTC)
         except JobCancelledError:
             with self._lock:
                 state.status = JobStatus.CANCELLED

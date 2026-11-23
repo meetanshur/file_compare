@@ -277,12 +277,15 @@ class ComparisonAgent:
         tool_names = self.selected_tools(compare_config, detection_a, detection_b)
         if self.config.enable_config_proposals and any(samples.values()):
             tool_names = (*tool_names[:-1], "propose_config", tool_names[-1])
+        progress_total = len(tool_names) + 2
+        context.report_progress(0, progress_total)
         warnings: list[str] = []
         raw_result: RawComparisonResult | None = None
-        for tool_name in tool_names:
+        for stage, tool_name in enumerate(tool_names, start=1):
             if store.truncated:
                 break
             cancellation_check()
+            context.report_progress(stage, progress_total)
             if tool_name == "run_raw_comparison":
                 raw_result = self._run_raw(
                     store, source_a, source_b, cancellation_check, compare_config
@@ -394,6 +397,7 @@ class ComparisonAgent:
             detections,
             compare_config,
         )
+        context.report_progress(progress_total, progress_total)
         cancellation_check()
         return ComparisonAgentResult(
             detections=detections,
