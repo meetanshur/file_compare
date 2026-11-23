@@ -117,6 +117,30 @@ Short rows carry a `too_few_characters` warning; extra row text is retained in
 line terminator and all leading/trailing whitespace. Raw byte comparison
 remains necessary for byte-level encoding and BOM differences.
 
+## Streaming XLSX rows
+
+`XLSXParser` implements the shared `Parser` protocol and uses openpyxl's
+read-only worksheet iteration. It accepts a seekable or non-seekable binary
+source, spools the compressed workbook to a temporary file using bounded
+1 MiB reads, then yields one row at a time. Set `sheet_name` to select one
+worksheet; otherwise worksheets are read in workbook order. The first row is
+the header by default; `has_header=False` generates `column_1`, `column_2`,
+and so on. `format_override="xlsx"` can be used when the extension/content
+sample is ambiguous.
+
+Cell values are the Python values interpreted by openpyxl: text, booleans,
+numbers, dates, formulas (with `data_only=False`), or `None` for blank cells.
+Excel number formats are not applied to values, so numeric cells may not retain
+their display formatting or original XML lexical representation. Use raw
+comparison for exact workbook bytes and formatting differences.
+
+Rows are read incrementally, but the compressed file is temporarily stored on
+disk and openpyxl may retain the workbook shared-string table in memory.
+Memory is therefore not guaranteed to be independent of workbook size. Ensure
+the temporary directory has enough free space and avoid oversized shared
+string tables within a constrained memory budget. The input stream remains
+owned by the caller.
+
 ```python
 from parsers.structured import FixedWidthParser, JSONParser, PlainTextParser, YAMLParser
 
@@ -131,4 +155,10 @@ with open("legacy.dat", "rb") as stream:
         encoding_override="utf-8",
     ).parse(stream):
         process(record.values, record.warnings)
+
+from parsers.xlsx import XLSXParser
+
+with open("workbook.xlsx", "rb") as stream:
+    for record in XLSXParser(filename="workbook.xlsx", sheet_name="Records").parse(stream):
+        process(record.values)
 ```

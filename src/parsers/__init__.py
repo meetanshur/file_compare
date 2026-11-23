@@ -30,6 +30,7 @@ from parsers.structured import (
     TextRecord,
     YAMLParser,
 )
+from parsers.xlsx import XLSXParseError, XLSXParser, XLSXRecord
 from parsers.xml import XmlElement, XMLParseError, XMLParser, XmlRecord, iter_xml_records
 
 __all__ = [
@@ -58,6 +59,9 @@ __all__ = [
     "YAMLParser",
     "XMLParseError",
     "XMLParser",
+    "XLSXParseError",
+    "XLSXParser",
+    "XLSXRecord",
     "XmlElement",
     "XmlRecord",
     "detect_file",
