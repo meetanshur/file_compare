@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
@@ -16,6 +17,16 @@ from parsers.detection import DEFAULT_SAMPLE_SIZE_BYTES
 from parsers.text_stream import detach_text_stream, open_detected_text
 
 _TEXT_READ_SIZE = 64 * 1024
+
+
+class _TextScalarSafeLoader(yaml.SafeLoader):
+    """Keep implicitly typed YAML scalars as strings while using safe tags."""
+
+
+_TextScalarSafeLoader.yaml_implicit_resolvers = copy.deepcopy(
+    yaml.SafeLoader.yaml_implicit_resolvers
+)
+_TextScalarSafeLoader.yaml_implicit_resolvers.clear()
 
 
 class StructuredParseError(ValueError):
@@ -203,7 +214,7 @@ class JSONParser(Parser[StructuredRecord]):
             raise StructuredParseError("JSON source is empty")
         value_text = _read_started_value(reader, first)
         try:
-            value = json.loads(value_text)
+            value = _json_loads(value_text)
         except json.JSONDecodeError as exc:
             raise _json_error(self.filename, exc) from exc
         reader.skip_whitespace()
@@ -227,7 +238,7 @@ class JSONParser(Parser[StructuredRecord]):
         while True:
             try:
                 value_text = reader.read_value()
-                value = json.loads(value_text)
+                value = _json_loads(value_text)
             except json.JSONDecodeError as exc:
                 raise _json_error(self.filename, exc) from exc
             except StructuredParseError as exc:
@@ -260,7 +271,7 @@ class JSONParser(Parser[StructuredRecord]):
             if not line.strip():
                 continue
             try:
-                value = json.loads(line)
+                value = _json_loads(line)
             except json.JSONDecodeError as exc:
                 raise StructuredParseError(
                     f"Malformed JSON Lines input in {self.filename or 'source'} "
@@ -297,7 +308,8 @@ class YAMLParser(Parser[StructuredRecord]):
             raise StructuredParseError(str(exc)) from exc
 
         try:
-            for index, value in enumerate(yaml.safe_load_all(text_stream), start=1):
+            documents = yaml.load_all(text_stream, Loader=_TextScalarSafeLoader)
+            for index, value in enumerate(documents, start=1):
                 yield StructuredRecord(index=index, value=value)
         except yaml.YAMLError as exc:
             mark = getattr(exc, "problem_mark", None)
@@ -439,6 +451,10 @@ def _json_error(filename: str | None, exc: json.JSONDecodeError) -> StructuredPa
         f"Malformed JSON in {filename or 'source'} at line {exc.lineno}, "
         f"column {exc.colno}: {exc.msg}"
     )
+
+
+def _json_loads(text: str) -> Any:
+    return json.loads(text, parse_int=str, parse_float=str)
 
 
 def _remove_line_terminator(line: str) -> str:

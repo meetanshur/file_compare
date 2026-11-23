@@ -20,14 +20,27 @@ def test_json_parser_yields_top_level_array_values_incrementally() -> None:
     records = list(JSONParser(filename="records.json").parse(source))
 
     assert [record.index for record in records] == [1, 2]
-    assert records[0].value == {"id": "007", "amount": 1.10}
+    assert records[0].value == {"id": "007", "amount": "1.10"}
+
+
+def test_json_parser_preserves_exact_number_lexemes() -> None:
+    source = BytesIO(b"[1.10,0.1000,1E2,12345678901234567890]")
+
+    records = list(JSONParser(filename="numbers.json").parse(source))
+
+    assert [record.value for record in records] == [
+        "1.10",
+        "0.1000",
+        "1E2",
+        "12345678901234567890",
+    ]
 
 
 def test_json_parser_yields_single_object_or_scalar_document() -> None:
     object_records = list(JSONParser(filename="single.json").parse(BytesIO(b'{"x":[1,2]}')))
     scalar_records = list(JSONParser(filename="scalar.json").parse(BytesIO(b"true")))
 
-    assert object_records[0].value == {"x": [1, 2]}
+    assert object_records[0].value == {"x": ["1", "2"]}
     assert scalar_records[0].value is True
 
 
@@ -36,8 +49,30 @@ def test_json_lines_mode_yields_each_nonblank_line() -> None:
 
     records = list(JSONParser(filename="records.jsonl", json_lines=True).parse(source))
 
-    assert [record.value for record in records] == [{"id": 1}, {"id": 2}]
+    assert [record.value for record in records] == [{"id": "1"}, {"id": "2"}]
     assert [record.index for record in records] == [1, 2]
+
+
+def test_yaml_parser_keeps_implicit_scalar_values_as_original_text() -> None:
+    source = BytesIO(
+        b"account: 007\n"
+        b"amount: 1.10\n"
+        b"affirmative: yes\n"
+        b"negative: no\n"
+        b"empty: null\n"
+        b"date: 2024-01-05\n"
+    )
+
+    record = next(YAMLParser(filename="values.yaml").parse(source))
+
+    assert record.value == {
+        "account": "007",
+        "amount": "1.10",
+        "affirmative": "yes",
+        "negative": "no",
+        "empty": "null",
+        "date": "2024-01-05",
+    }
 
 
 def test_json_parser_reports_malformed_array_and_trailing_content() -> None:
@@ -66,10 +101,11 @@ def test_json_parser_is_incremental_for_large_top_level_arrays() -> None:
             self.requests.append(size)
             return super().read(size)
 
-    source = TrackedStream(b"[" + b",".join(b'{"id":1}' for _ in range(50_000)) + b"]")
+    source = TrackedStream(b"[" + b",".join(b'{"id":1}' for _ in range(200_000)) + b"]")
     records = JSONParser(filename="large.json").parse(source)
 
-    assert next(records).value == {"id": 1}
+    assert next(records).value == {"id": "1"}
+    assert source.tell() < 256 * 1024
     assert source.tell() < len(source.getbuffer())
     assert all(0 < size <= 64 * 1024 for size in source.requests)
     records.close()
@@ -80,7 +116,7 @@ def test_yaml_parser_streams_multiple_safe_documents() -> None:
 
     records = list(YAMLParser(filename="records.yaml").parse(source))
 
-    assert [record.value for record in records] == [{"id": 1}, {"id": 2}]
+    assert [record.value for record in records] == [{"id": "1"}, {"id": "2"}]
     assert [record.index for record in records] == [1, 2]
 
 

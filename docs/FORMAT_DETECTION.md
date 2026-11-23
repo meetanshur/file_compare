@@ -95,9 +95,18 @@ single record. Set `json_lines=True` to parse newline-delimited JSON. Array
 parsing holds only one value at a time, so one exceptionally large JSON value
 can still require substantial memory.
 
-`YAMLParser` uses PyYAML's safe, document-at-a-time loader. Each YAML document
-is one record; a single large document is still materialized as one value.
-Unsafe Python object constructors are not enabled.
+JSON integer and floating-point number tokens are returned as their original
+text, preserving lexical distinctions such as `1.10`, `1E2`, and long integer
+digits. The parser reads and decodes each top-level array value before yielding
+it, rather than building the complete array. Its memory use is therefore
+bounded by the largest individual array value plus parser buffers; a single
+very large value can still use substantial memory.
+
+`YAMLParser` uses a safe loader with implicit scalar resolvers disabled. Plain
+scalars such as `007`, `1.10`, `yes`, `no`, `null`, and `2024-01-05` remain
+their original text rather than being converted to numbers, booleans, null, or
+dates. Each YAML document is one record; a single large document is still
+materialized as one value. Unsafe Python object constructors are not enabled.
 
 `FixedWidthParser` requires widths as a sequence or a name-to-width mapping.
 Widths count decoded characters, not bytes. Spaces inside fields are retained.
