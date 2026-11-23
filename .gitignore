@@ -12,3 +12,4 @@ dist/
 htmlcov/
 .idea/
 .vscode/
+.test_data/
