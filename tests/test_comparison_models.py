@@ -6,6 +6,7 @@ from pydantic import ValidationError
 
 from common.comparison_config import (
     ComparisonConfig,
+    ReconciliationRules,
     Strictness,
     WhitespaceMode,
     load_comparison_config,
@@ -22,7 +23,8 @@ from common.comparison_result import (
 def test_load_yaml_config(tmp_path) -> None:
     config_path = tmp_path / "comparison.yaml"
     config_path.write_text(
-        'record_key: [id]\nnumeric_tolerance: "0.05"\nwhitespace: trim\nstrictness: lenient\n',
+        'record_key: [id]\nnumeric_tolerance: "0.05"\nwhitespace: trim\nstrictness: lenient\n'
+        "reconciliation_rules:\n  currency_field: currency\n  amount_field: amount\n",
         encoding="utf-8",
     )
 
@@ -32,6 +34,8 @@ def test_load_yaml_config(tmp_path) -> None:
     assert config.numeric_tolerance == Decimal("0.05")
     assert config.whitespace is WhitespaceMode.TRIM
     assert config.strictness is Strictness.LENIENT
+    assert config.reconciliation_rules.currency_field == "currency"
+    assert config.reconciliation_rules.amount_field == "amount"
 
 
 def test_load_json_config(tmp_path) -> None:
@@ -56,6 +60,8 @@ def test_config_rejects_negative_tolerance_and_unknown_fields() -> None:
         ComparisonConfig(max_memory_mb=0)
     with pytest.raises(ValidationError):
         ComparisonConfig(unexpected_option=True)
+    with pytest.raises(ValidationError):
+        ReconciliationRules(amount_field="amount")
 
 
 def test_result_models_represent_findings_and_aggregate_counts() -> None:

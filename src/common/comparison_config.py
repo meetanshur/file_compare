@@ -1,5 +1,7 @@
 """Validated comparison settings and configuration-file loading."""
 
+from __future__ import annotations
+
 import json
 from decimal import Decimal
 from enum import StrEnum
@@ -7,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class WhitespaceMode(StrEnum):
@@ -39,6 +41,24 @@ class ComparisonLevels(BaseModel):
     reconciliation: bool = True
 
 
+class ReconciliationRules(BaseModel):
+    """Fields used for streaming financial reconciliation aggregates."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    currency_field: str | None = Field(default=None, min_length=1)
+    amount_field: str | None = Field(default=None, min_length=1)
+    debit_field: str | None = Field(default=None, min_length=1)
+    credit_field: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def require_currency_for_monetary_fields(self) -> ReconciliationRules:
+        has_monetary_field = any((self.amount_field, self.debit_field, self.credit_field))
+        if has_monetary_field and not self.currency_field:
+            raise ValueError("currency_field is required when configuring monetary fields")
+        return self
+
+
 class ComparisonConfig(BaseModel):
     """Rules used to configure a deterministic file comparison."""
 
@@ -48,6 +68,7 @@ class ComparisonConfig(BaseModel):
     max_total_differences: int = Field(default=1_000_000, ge=0)
     levels: ComparisonLevels = Field(default_factory=ComparisonLevels)
     record_key: list[str] = Field(default_factory=list)
+    reconciliation_rules: ReconciliationRules = Field(default_factory=ReconciliationRules)
     trim_keys: bool = False
     key_case_sensitive: bool = True
     ignore_fields: list[str] = Field(default_factory=list)

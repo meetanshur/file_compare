@@ -9,6 +9,10 @@ from comparators.raw import (
     RawDifference,
     RawDifferenceKind,
 )
+from comparators.reconciliation import (
+    ReconciliationComparator,
+    ReconciliationComparisonResult,
+)
 from comparators.records import (
     RecordComparator,
     RecordComparisonResult,
@@ -29,6 +33,8 @@ __all__ = [
     "RawDifferenceKind",
     "RecordComparator",
     "RecordComparisonResult",
+    "ReconciliationComparator",
+    "ReconciliationComparisonResult",
     "XMLSchemaComparator",
     "XMLSchemaError",
     "validate_xml_schema",

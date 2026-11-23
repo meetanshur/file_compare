@@ -91,6 +91,16 @@ findings in memory.
   rows whose hashes differ. Comparison rules such as ignored fields,
   null-versus-empty, case, and whitespace are applied after that raw row hash,
   so they cannot conceal changes from the field comparison.
+- Reconciliation counts records as they are parsed and accumulates configured
+  amount, debit, and credit fields per currency using Python `Decimal`, never
+  binary floating-point arithmetic. Configure these with `reconciliation_rules`
+  (`currency_field` plus any of `amount_field`, `debit_field`, and
+  `credit_field`). A missing or blank monetary value contributes zero; a
+  nonblank invalid or non-finite value, or a currency missing for a nonzero
+  amount, raises a clear error. Currency whitespace and case follow the
+  configured comparison rules. `numeric_tolerance` suppresses aggregate
+  differences at or below its threshold. Memory is proportional to the number
+  of distinct currencies, not the number of input records.
 - JSON array values and YAML documents are materialized one value/document at
   a time; JSON Lines and plain text are processed one line at a time. Fixed-
   width parsing requires configured field widths. Bound the largest record or
