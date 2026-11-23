@@ -29,13 +29,25 @@ class AgentConfig(BaseModel):
 
     provider: LLMProvider = LLMProvider.OPENAI
     model: str = Field(default="gpt-4o-mini", min_length=1)
-    api_key: SecretStr | None = Field(default=None, repr=False)
     api_key_env: str = Field(default="OPENAI_API_KEY", min_length=1)
     base_url: str | None = None
     timeout_seconds: float = Field(default=30.0, gt=0, le=600)
     max_retries: int = Field(default=2, ge=0, le=10)
     max_output_tokens: int = Field(default=2048, gt=0, le=100_000)
     max_request_text_chars: int = Field(default=12_000, gt=0, le=1_000_000)
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_inline_api_key(cls, data: object) -> object:
+        if isinstance(data, Mapping) and "api_key" in data:
+            environment_name = data.get("api_key_env", "OPENAI_API_KEY")
+            if not isinstance(environment_name, str) or not environment_name:
+                environment_name = "api_key_env"
+            raise ValueError(
+                f"api_key is not allowed in config; set the {environment_name} environment "
+                "variable instead"
+            )
+        return data
 
     @model_validator(mode="after")
     def validate_provider_options(self) -> Self:
@@ -45,11 +57,9 @@ class AgentConfig(BaseModel):
         return self
 
     def resolve(self, environ: Mapping[str, str] | None = None) -> ResolvedAgentConfig:
-        """Resolve credentials from environment without exposing them in config dumps."""
+        """Resolve credentials only from the configured environment variable."""
         environment = os.environ if environ is None else environ
-        configured_key = self.api_key.get_secret_value() if self.api_key is not None else None
-        api_key = configured_key or environment.get(self.api_key_env)
-        return ResolvedAgentConfig(config=self, api_key=api_key)
+        return ResolvedAgentConfig(config=self, api_key=environment.get(self.api_key_env))
 
 
 class ResolvedAgentConfig(BaseModel):
@@ -69,7 +79,9 @@ class ResolvedAgentConfig(BaseModel):
     def require_api_key(self) -> str:
         """Return the credential or raise an explicit provider configuration error."""
         if self.api_key is None or not self.api_key.get_secret_value():
-            raise ValueError(f"Missing API key: set {self.config.api_key_env} or configure api_key")
+            raise ValueError(
+                f"Missing API key: set the environment variable {self.config.api_key_env}"
+            )
         return self.api_key.get_secret_value()
 
 

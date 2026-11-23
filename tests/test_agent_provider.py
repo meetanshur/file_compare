@@ -76,11 +76,19 @@ def test_agent_config_loads_yaml_and_resolves_named_environment_secret(tmp_path)
     assert "secret-from-env" not in json.dumps(config.model_dump(mode="json"))
 
 
-def test_agent_config_supports_inline_secret_without_repr_leak() -> None:
-    config = AgentConfig(api_key="sensitive-value")
+def test_agent_config_rejects_inline_secret_and_directs_user_to_environment(tmp_path) -> None:
+    secret = "sensitive-value"
+    config_file = tmp_path / "agent.yaml"
+    config_file.write_text(
+        f"provider: openai\napi_key: {secret}\napi_key_env: TEST_LLM_KEY\n",
+        encoding="utf-8",
+    )
 
-    assert config.resolve({}).require_api_key() == "sensitive-value"
-    assert "sensitive-value" not in repr(config)
+    with pytest.raises(ValueError, match="api_key is not allowed in config") as error:
+        load_agent_config(config_file)
+
+    assert "TEST_LLM_KEY" in str(error.value)
+    assert secret not in str(error.value)
 
 
 def test_agent_config_reports_invalid_provider_fields() -> None:

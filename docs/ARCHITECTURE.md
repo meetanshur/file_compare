@@ -34,7 +34,7 @@ loaded from JSON or YAML. The `provider` value is validated; `openai` is
 currently implemented, while `azure_openai`, `anthropic`, and `local` are
 reserved provider identifiers until their adapters are added. API keys should
 come from the environment variable named by `api_key_env` (default
-`OPENAI_API_KEY`), not committed config files. See
+`OPENAI_API_KEY`); inline `api_key` values in config files are rejected. See
 `config/agent.example.yaml`. `OpenAIAdapter` uses Chat Completions, validates
 the response text, and never performs deterministic file comparison; local
 comparison tools remain the source of truth. Providers implement the shared
