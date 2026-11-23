@@ -127,7 +127,8 @@ sequence. If none is found, one replaced-region finding covers the window
 before comparison resumes. No sequence-diff library is used.
 
 Each finding has byte offsets and lengths, decoded character offsets, one-based
-line/column positions, and bounded byte/text previews. Decoding uses an
+line/column positions, the complete changed byte spans (bounded by the
+resynchronization window), and bounded decoded-text previews. Decoding uses an
 incremental decoder and can be overridden independently for each input; the
 byte finding remains authoritative for exact identity, including BOM and
 encoding differences. Character comparison does not normalize Unicode,

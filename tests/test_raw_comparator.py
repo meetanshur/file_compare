@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import random
 import string
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 
 from comparators import (
     RawComparator,
     RawComparisonStatus,
+    RawDifference,
     RawDifferenceKind,
 )
 
@@ -224,6 +228,66 @@ def test_no_resynchronization_reports_one_bounded_replaced_region() -> None:
     assert len(first.value_b) <= 256
 
 
+@pytest.mark.parametrize("edit", ["insert", "delete", "replace", "two_close"])
+def test_reported_edit_spans_reconstruct_small_random_target(edit: str) -> None:
+    original = _random_ascii(4_000)
+    if edit == "insert":
+        target = original[:1_200] + b"," + original[1_200:]
+    elif edit == "delete":
+        target = original[:1_200] + original[1_201:]
+    elif edit == "replace":
+        target = original[:1_200] + b"!" + original[1_201:]
+    else:
+        target = original[:1_200] + b"!" + original[1_201:1_214] + b"?" + original[1_215:]
+
+    differences = list(_compare(original, target))
+
+    assert _reconstruct(original, differences) == target
+    assert (
+        hashlib.sha256(_reconstruct(original, differences)).digest()
+        == hashlib.sha256(target).digest()
+    )
+    if edit == "two_close":
+        assert len(differences) == 1
+
+
+def test_reported_xml_fixture_spans_reconstruct_target_byte_for_byte(tmp_path) -> None:
+    fixture_directory = Path(__file__).resolve().parents[1] / ".test_data"
+    manifest_path = fixture_directory / "xml_100MB_expected.json"
+    if not manifest_path.exists():
+        pytest.skip("generated XML fixtures are unavailable")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    path_a = fixture_directory / manifest["files"]["file_a"]["name"]
+    path_b = fixture_directory / manifest["files"]["file_b"]["name"]
+    actual_a = _sha256(path_a)
+    actual_b = _sha256(path_b)
+    assert actual_a == manifest["files"]["file_a"]["sha256"]
+    assert actual_b == manifest["files"]["file_b"]["sha256"]
+
+    with path_a.open("rb") as source_a, path_b.open("rb") as source_b:
+        result = RawComparator().compare(source_a, source_b)
+        differences = list(result)
+
+    assert len(differences) == 2
+    reconstructed_path = tmp_path / "reconstructed.xml"
+    _write_reconstruction(path_a, differences, reconstructed_path)
+    assert _sha256(reconstructed_path) == actual_b
+    _assert_files_equal(reconstructed_path, path_b)
+
+    expected = manifest["expected_differences"]
+    first_a = differences[0].value_a.decode("ascii")
+    first_b = differences[0].value_b.decode("ascii")
+    second_a = differences[1].value_a.decode("ascii")
+    second_b = differences[1].value_b.decode("ascii")
+    delete_key = expected["delete"][0]["key"]
+    insert_key = expected["insert"][0]["key"]
+    update = expected["update"][0]
+    assert first_a == f'{delete_key[-1]}"><value>value-{delete_key}'
+    assert first_b == f'{update["key"][-1]}"><value>{update["value_b"]}'
+    assert second_a == f'{update["key"][-1]}"><value>{update["value_a"]}'
+    assert second_b == f'{insert_key[-1]}"><value>value-{insert_key}'
+
+
 def test_raw_comparison_handles_nonseekable_short_read_streams() -> None:
     class ShortReadStream:
         def __init__(self, value: bytes) -> None:
@@ -273,3 +337,54 @@ def _random_ascii(length: int) -> bytes:
     return "".join(generator.choices(string.ascii_letters + string.digits, k=length)).encode(
         "ascii"
     )
+
+
+def _reconstruct(source_a: bytes, differences: list[RawDifference]) -> bytes:
+    output = bytearray()
+    cursor_a = 0
+    for difference in differences:
+        assert difference.offset_a >= cursor_a
+        output.extend(source_a[cursor_a : difference.offset_a])
+        output.extend(difference.value_b)
+        cursor_a = difference.offset_a + difference.length_a
+    output.extend(source_a[cursor_a:])
+    return bytes(output)
+
+
+def _write_reconstruction(
+    source_path: Path,
+    differences: list[RawDifference],
+    target_path: Path,
+) -> None:
+    cursor_a = 0
+    with source_path.open("rb") as source, target_path.open("wb") as target:
+        for difference in differences:
+            while cursor_a < difference.offset_a:
+                chunk = source.read(min(1024 * 1024, difference.offset_a - cursor_a))
+                if not chunk:
+                    raise AssertionError("Unexpected EOF before edit offset")
+                target.write(chunk)
+                cursor_a += len(chunk)
+            source.seek(difference.offset_a + difference.length_a)
+            target.write(difference.value_b)
+            cursor_a = difference.offset_a + difference.length_a
+        while chunk := source.read(1024 * 1024):
+            target.write(chunk)
+
+
+def _assert_files_equal(path_a: Path, path_b: Path) -> None:
+    with path_a.open("rb") as source_a, path_b.open("rb") as source_b:
+        while True:
+            chunk_a = source_a.read(1024 * 1024)
+            chunk_b = source_b.read(1024 * 1024)
+            assert chunk_a == chunk_b
+            if not chunk_a:
+                return
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()

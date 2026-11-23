@@ -293,7 +293,7 @@ class RawComparator:
         while offset_a < source_a.size or offset_b < source_b.size:
             _check_cancelled(cancellation_check)
             if offset_a == source_a.size:
-                length_b = source_b.size - offset_b
+                length_b = min(self.resync_window_bytes, source_b.size - offset_b)
                 yield _make_difference(
                     RawDifferenceKind.INSERT,
                     source_a,
@@ -309,9 +309,10 @@ class RawComparator:
                     self.chunk_size,
                     cancellation_check,
                 )
-                return
+                offset_b += length_b
+                continue
             if offset_b == source_b.size:
-                length_a = source_a.size - offset_a
+                length_a = min(self.resync_window_bytes, source_a.size - offset_a)
                 yield _make_difference(
                     RawDifferenceKind.DELETE,
                     source_a,
@@ -327,7 +328,8 @@ class RawComparator:
                     self.chunk_size,
                     cancellation_check,
                 )
-                return
+                offset_a += length_a
+                continue
 
             block_a = _read_at(
                 source_a.stream, offset_a, min(self.chunk_size, source_a.size - offset_a)
@@ -510,8 +512,8 @@ def _make_difference(
 ) -> RawDifference:
     start_a = position_a.current_position()
     start_b = position_b.current_position()
-    bytes_a = _read_at(source_a.stream, offset_a, min(length_a, _VALUE_PREVIEW_BYTES))
-    bytes_b = _read_at(source_b.stream, offset_b, min(length_b, _VALUE_PREVIEW_BYTES))
+    bytes_a = _read_at(source_a.stream, offset_a, length_a)
+    bytes_b = _read_at(source_b.stream, offset_b, length_b)
     text_a = _advance_span(
         source_a.stream,
         offset_a,
