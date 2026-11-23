@@ -281,7 +281,7 @@ class DuckDBStore:
         cancellation_check: Callable[[], None] | None = None,
         batch_size: int = 1_000,
     ) -> Iterator[Difference]:
-        """Yield SQL-joined record differences, reporting and excluding ambiguous keys."""
+        """Yield SQL-joined differences, including order-insensitive duplicate-group checks."""
         if batch_size < 1:
             raise ValueError("batch_size must be greater than zero")
 
@@ -330,10 +330,85 @@ class DuckDBStore:
                             c.side,
                             c.record_count,
                             NULL::JSON AS value_a,
-                            NULL::JSON AS value_b
+                            NULL::JSON AS value_b,
+                            'duplicate_warning' AS detail
                         FROM key_counts c
                         WHERE c.record_count > 1
                         GROUP BY c.record_key_text, c.side, c.record_count
+                    ),
+                    duplicate_totals AS (
+                        SELECT side, record_key_text, record_count
+                        FROM key_counts
+                        WHERE record_key_text IN (SELECT record_key_text FROM duplicate_keys)
+                    ),
+                    duplicate_size_findings AS (
+                        SELECT
+                            'duplicate_key' AS comparison_type,
+                            d.record_key_text,
+                            d.record_key_text::JSON AS record_key,
+                            'A vs B' AS side,
+                            NULL::BIGINT AS record_count,
+                            to_json(struct_pack(record_count := coalesce(a.record_count, 0)))
+                                AS value_a,
+                            to_json(struct_pack(record_count := coalesce(b.record_count, 0)))
+                                AS value_b,
+                            'group_size' AS detail
+                        FROM (
+                            SELECT
+                                d.record_key_text,
+                                min(r.record_key_text)::JSON AS record_key
+                            FROM duplicate_keys d
+                            JOIN comparison_records r USING (record_key_text)
+                            GROUP BY d.record_key_text
+                        ) d
+                        LEFT JOIN duplicate_totals a
+                          ON a.record_key_text = d.record_key_text AND a.side = 'A'
+                        LEFT JOIN duplicate_totals b
+                          ON b.record_key_text = d.record_key_text AND b.side = 'B'
+                        WHERE coalesce(a.record_count, 0) != coalesce(b.record_count, 0)
+                    ),
+                    duplicate_payload_counts AS (
+                        SELECT
+                            side,
+                            record_key_text,
+                            CAST(payload AS VARCHAR) AS payload_text,
+                            payload,
+                            count(*) AS record_count
+                        FROM comparison_records
+                        WHERE record_key_text IN (SELECT record_key_text FROM duplicate_keys)
+                        GROUP BY side, record_key_text, CAST(payload AS VARCHAR), payload
+                    ),
+                    duplicate_record_findings AS (
+                        SELECT
+                            'duplicate_key' AS comparison_type,
+                            coalesce(a.record_key_text, b.record_key_text) AS record_key_text,
+                            coalesce(a.record_key_text, b.record_key_text)::JSON AS record_key,
+                            'A vs B' AS side,
+                            NULL::BIGINT AS record_count,
+                            CASE
+                                WHEN a.record_count IS NULL THEN NULL::JSON
+                                ELSE to_json(struct_pack(
+                                    record_value := a.payload,
+                                    count := a.record_count
+                                ))
+                            END AS value_a,
+                            CASE
+                                WHEN b.record_count IS NULL THEN NULL::JSON
+                                ELSE to_json(struct_pack(
+                                    record_value := b.payload,
+                                    count := b.record_count
+                                ))
+                            END AS value_b,
+                            'record_mismatch' AS detail
+                        FROM (
+                            SELECT * FROM duplicate_payload_counts WHERE side = 'A'
+                        ) a
+                        FULL OUTER JOIN (
+                            SELECT * FROM duplicate_payload_counts WHERE side = 'B'
+                        ) b
+                          ON a.record_key_text = b.record_key_text
+                         AND a.payload_text = b.payload_text
+                        WHERE a.record_count IS NULL OR b.record_count IS NULL
                     ),
                     record_findings AS (
                         SELECT
@@ -347,7 +422,8 @@ class DuckDBStore:
                             NULL::VARCHAR AS side,
                             NULL::BIGINT AS record_count,
                             a.payload AS value_a,
-                            b.payload AS value_b
+                            b.payload AS value_b,
+                            'record' AS detail
                         FROM unique_a a
                         FULL OUTER JOIN unique_b b
                           ON a.record_key_text = b.record_key_text
@@ -361,9 +437,13 @@ class DuckDBStore:
                     FROM (
                         SELECT * FROM duplicate_findings
                         UNION ALL
+                        SELECT * FROM duplicate_size_findings
+                        UNION ALL
+                        SELECT * FROM duplicate_record_findings
+                        UNION ALL
                         SELECT * FROM record_findings
                     ) all_findings
-                    ORDER BY comparison_type, record_key_text, side
+                    ORDER BY comparison_type, record_key_text, side, detail
                     {limit_clause}
                     """
                 )
@@ -373,9 +453,11 @@ class DuckDBStore:
                         cancellation_check()
                     rows = connection.execute(
                         """
-                        SELECT comparison_type, record_key, side, record_count, value_a, value_b
+                        SELECT
+                            comparison_type, record_key, side, record_count,
+                            value_a, value_b, detail
                         FROM record_comparison_findings
-                        ORDER BY comparison_type, record_key_text, side
+                        ORDER BY comparison_type, record_key_text, side, detail
                         LIMIT ? OFFSET ?
                         """,
                         [batch_size, offset],
@@ -383,23 +465,53 @@ class DuckDBStore:
                     if not rows:
                         break
                     offset += len(rows)
-                    for comparison_type, record_key, side, record_count, value_a, value_b in rows:
+                    for (
+                        comparison_type,
+                        record_key,
+                        side,
+                        record_count,
+                        value_a,
+                        value_b,
+                        detail,
+                    ) in rows:
                         if cancellation_check is not None:
                             cancellation_check()
                         key = json.loads(record_key) if isinstance(record_key, str) else record_key
                         key_text = _serialize_json(key)
                         if comparison_type == ComparisonType.DUPLICATE_KEY.value:
+                            if isinstance(value_a, str):
+                                value_a = json.loads(value_a)
+                            if isinstance(value_b, str):
+                                value_b = json.loads(value_b)
+                            if detail == "duplicate_warning":
+                                message = (
+                                    f"Duplicate record key appears {record_count} times in "
+                                    f"file {side}."
+                                )
+                                severity = Severity.WARNING
+                                value_a = {"key": key, "count": record_count}
+                                value_b = None
+                            elif detail == "group_size":
+                                count_a = value_a["record_count"]
+                                count_b = value_b["record_count"]
+                                message = (
+                                    f"Duplicate-key group size differs: file A has {count_a}, "
+                                    f"file B has {count_b}."
+                                )
+                                severity = Severity.ERROR
+                            else:
+                                message = (
+                                    "Duplicate-key record set differs "
+                                    "(compared order-insensitively)."
+                                )
+                                severity = Severity.ERROR
                             yield Difference(
                                 comparison_type=ComparisonType.DUPLICATE_KEY,
                                 location=f"side={side} key={key_text}",
-                                message=(
-                                    f"Duplicate record key appears {record_count} times in "
-                                    f"file {side}; this key is excluded from insert/update/delete "
-                                    "matching because its record pairing is ambiguous."
-                                ),
-                                severity=Severity.ERROR,
-                                value_a={"key": key, "count": record_count},
-                                value_b=None,
+                                message=message,
+                                severity=severity,
+                                value_a=value_a,
+                                value_b=value_b,
                             )
                             continue
                         category = ComparisonType(comparison_type)

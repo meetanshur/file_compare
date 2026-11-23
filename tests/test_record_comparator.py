@@ -63,34 +63,59 @@ def test_record_comparison_reports_insert_update_and_delete(tmp_path) -> None:
     assert update.value_b == {"id": "update", "value": "new"}
 
 
-def test_duplicate_keys_are_reported_and_excluded_from_matching(tmp_path) -> None:
+def test_duplicate_in_a_only_reports_group_size_and_records(tmp_path) -> None:
     store, _ = _compare(
         tmp_path,
-        [{"id": "dup", "value": "a"}, {"id": "dup", "value": "b"}, {"id": "gone"}],
-        [{"id": "dup", "value": "c"}, {"id": "new"}],
+        [{"id": "dup", "value": "same"}, {"id": "dup", "value": "same"}],
+        [{"id": "dup", "value": "same"}],
     )
     try:
-        findings = list(store.iter_differences())
+        findings = [
+            item
+            for item in store.iter_differences()
+            if item.comparison_type is ComparisonType.DUPLICATE_KEY
+        ]
     finally:
         store.close()
 
-    assert Counter(item.comparison_type for item in findings) == {
-        ComparisonType.DUPLICATE_KEY: 1,
-        ComparisonType.INSERT: 1,
-        ComparisonType.DELETE: 1,
-    }
-    duplicate = next(
-        item for item in findings if item.comparison_type is ComparisonType.DUPLICATE_KEY
-    )
-    assert duplicate.value_a == {"key": [["id", "dup"]], "count": 2}
-    assert "excluded from insert/update/delete matching" in duplicate.message
+    assert len(findings) == 2
+    warning = next(item for item in findings if "appears" in item.message)
+    group_size = next(item for item in findings if "group size differs" in item.message)
+    assert warning.location.startswith("side=A ")
+    assert warning.value_a == {"key": [["id", "dup"]], "count": 2}
+    assert group_size.value_a == {"record_count": 2}
+    assert group_size.value_b == {"record_count": 1}
 
 
-def test_duplicate_keys_on_both_sides_are_reported_separately(tmp_path) -> None:
+def test_duplicate_in_b_only_reports_group_size_and_records(tmp_path) -> None:
     store, _ = _compare(
         tmp_path,
-        [{"id": "dup"}, {"id": "dup"}],
-        [{"id": "dup"}, {"id": "dup"}, {"id": "dup"}],
+        [{"id": "dup", "value": "same"}],
+        [{"id": "dup", "value": "same"}, {"id": "dup", "value": "same"}],
+    )
+    try:
+        findings = [
+            item
+            for item in store.iter_differences()
+            if item.comparison_type is ComparisonType.DUPLICATE_KEY
+        ]
+    finally:
+        store.close()
+
+    assert len(findings) == 2
+    warning = next(item for item in findings if "appears" in item.message)
+    group_size = next(item for item in findings if "group size differs" in item.message)
+    assert warning.location.startswith("side=B ")
+    assert warning.value_a == {"key": [["id", "dup"]], "count": 2}
+    assert group_size.value_a == {"record_count": 1}
+    assert group_size.value_b == {"record_count": 2}
+
+
+def test_identical_duplicate_groups_only_report_per_side_warnings(tmp_path) -> None:
+    store, _ = _compare(
+        tmp_path,
+        [{"id": "dup", "value": "a"}, {"id": "dup", "value": "b"}],
+        [{"id": "dup", "value": "b"}, {"id": "dup", "value": "a"}],
     )
     try:
         findings = list(store.iter_differences())
@@ -100,7 +125,31 @@ def test_duplicate_keys_on_both_sides_are_reported_separately(tmp_path) -> None:
     assert len(findings) == 2
     assert all(item.comparison_type is ComparisonType.DUPLICATE_KEY for item in findings)
     assert {item.location.split(" ", 1)[0] for item in findings} == {"side=A", "side=B"}
-    assert {item.value_a["count"] for item in findings} == {2, 3}
+    assert all("appears" in item.message for item in findings)
+
+
+def test_duplicate_group_with_one_different_record_reports_unmatched_records(tmp_path) -> None:
+    store, _ = _compare(
+        tmp_path,
+        [{"id": "dup", "value": "a"}, {"id": "dup", "value": "b"}],
+        [{"id": "dup", "value": "a"}, {"id": "dup", "value": "changed"}],
+    )
+    try:
+        findings = list(store.iter_differences())
+    finally:
+        store.close()
+
+    mismatches = [item for item in findings if "record set differs" in item.message]
+    assert len(mismatches) == 2
+    assert all(item.location.startswith("side=A vs B ") for item in mismatches)
+    values = {
+        (
+            item.value_a["record_value"]["value"] if item.value_a else None,
+            item.value_b["record_value"]["value"] if item.value_b else None,
+        )
+        for item in mismatches
+    }
+    assert values == {("b", None), (None, "changed")}
 
 
 def test_missing_key_field_and_empty_key_configuration_are_errors(tmp_path) -> None:

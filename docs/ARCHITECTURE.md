@@ -77,10 +77,11 @@ findings in memory.
   formula text for formula cells); exact workbook-byte or lexical-number
   differences remain the responsibility of raw comparison.
 - Record keys are exact text by default and may be configured with
-  `trim_keys` and `key_case_sensitive`. Duplicate keys produce one finding per
-  duplicate key per file. Because pairing duplicate records is ambiguous,
-  every key duplicated in either file is excluded from insert/update/delete
-  matching on both sides; no record is silently selected or discarded.
+  `trim_keys` and `key_case_sensitive`. Duplicate keys produce one warning per
+  duplicate key per file. The complete record groups are also compared as
+  order-insensitive multisets: differing group sizes and unmatched record
+  occurrences are reported with the key and both sides' record data. Duplicate
+  keys are not paired arbitrarily or silently skipped.
 - JSON array values and YAML documents are materialized one value/document at
   a time; JSON Lines and plain text are processed one line at a time. Fixed-
   width parsing requires configured field widths. Bound the largest record or
