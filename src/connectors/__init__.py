@@ -2,6 +2,7 @@
 
 from connectors.azure_blob import AzureBlobConnector, AzureBlobSourceError
 from connectors.base import OpenedSource, SourceConnector, SourceMetadata
+from connectors.gcs import GCSConnector, GCSSourceError
 from connectors.http import HTTPConnector, HTTPSourceError
 from connectors.local import LocalFileConnector
 from connectors.s3 import S3Connector, S3SourceError
@@ -12,6 +13,8 @@ __all__ = [
     "AzureBlobSourceError",
     "HTTPConnector",
     "HTTPSourceError",
+    "GCSConnector",
+    "GCSSourceError",
     "LocalFileConnector",
     "OpenedSource",
     "S3Connector",

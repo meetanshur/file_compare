@@ -98,6 +98,26 @@ created client/credential are closed when the opened source exits its context.
 Azure SDK failures raise `AzureBlobSourceError` without including credentials
 or request URLs.
 
+The Google Cloud Storage connector accepts `gs://bucket/object` URIs and uses
+Application Default Credentials. It streams through the SDK's `BlobReader`
+with bounded range requests:
+
+```python
+from connectors.gcs import GCSConnector
+
+connector = GCSConnector()
+with connector.open("gs://my-bucket/incoming/data.csv") as source:
+    print(source.metadata.size_bytes, source.metadata.generation)
+    for chunk in source.read_chunks(4 * 1024 * 1024):
+        process(chunk)
+```
+
+Configure access through ADC, such as a workload identity or local developer
+credential. Credentials are not accepted in the source URI. The object reader
+and internally created GCS client close when the opened source exits its
+context; SDK failures raise `GCSSourceError` without disclosing request
+details.
+
 `SourceMetadata` contains a normalized URI, source type, name, optional byte
 size, timezone-aware modification time, content type, ETag/version identifiers,
 and optional checksum values. Values a connector cannot provide remain unset;
