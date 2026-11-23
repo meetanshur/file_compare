@@ -36,7 +36,7 @@ class AgentConfig(BaseModel):
     max_output_tokens: int = Field(default=2048, gt=0, le=100_000)
     max_request_text_chars: int = Field(default=12_000, gt=0, le=1_000_000)
     max_explanation_findings: int = Field(default=20, ge=0, le=1_000)
-    max_explanation_chars: int = Field(default=8_000, ge=256, le=100_000)
+    max_explanation_chars: int = Field(default=8_000, ge=512, le=100_000)
     max_sample_records: int = Field(default=5, ge=0, le=100)
     max_sample_chars: int = Field(default=2_000, ge=0, le=20_000)
     mask_sample_digits: bool = True
