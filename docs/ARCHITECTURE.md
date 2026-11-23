@@ -37,7 +37,14 @@ come from the environment variable named by `api_key_env` (default
 `OPENAI_API_KEY`), not committed config files. See
 `config/agent.example.yaml`. `OpenAIAdapter` uses Chat Completions, validates
 the response text, and never performs deterministic file comparison; local
-comparison tools remain the source of truth.
+comparison tools remain the source of truth. Providers implement the shared
+`LLMProviderAdapter` protocol, allowing orchestration to depend on
+`complete(messages)` instead of vendor SDKs. Requests are capped by
+`max_request_text_chars` across all message contents. OpenAI calls have a
+configured timeout and bounded exponential-backoff retries for transient
+network failures, rate limits, and retryable server responses. Credentials are
+redacted in config representations and provider failures never include
+untrusted SDK exception text.
 
 ## Resource defaults
 

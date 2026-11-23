@@ -35,6 +35,7 @@ class AgentConfig(BaseModel):
     timeout_seconds: float = Field(default=30.0, gt=0, le=600)
     max_retries: int = Field(default=2, ge=0, le=10)
     max_output_tokens: int = Field(default=2048, gt=0, le=100_000)
+    max_request_text_chars: int = Field(default=12_000, gt=0, le=1_000_000)
 
     @model_validator(mode="after")
     def validate_provider_options(self) -> Self:

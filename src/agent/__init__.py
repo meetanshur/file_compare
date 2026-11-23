@@ -10,6 +10,7 @@ from agent.config import (
 from agent.openai_adapter import (
     AgentProviderError,
     LLMMessage,
+    LLMProviderAdapter,
     LLMResponse,
     OpenAIAdapter,
     create_llm_adapter,
@@ -20,6 +21,7 @@ __all__ = [
     "AgentProviderError",
     "LLMMessage",
     "LLMProvider",
+    "LLMProviderAdapter",
     "LLMResponse",
     "OpenAIAdapter",
     "ResolvedAgentConfig",
