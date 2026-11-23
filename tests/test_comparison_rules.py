@@ -78,6 +78,42 @@ def test_ignore_patterns_and_per_field_overrides_apply_to_fields(tmp_path) -> No
     assert findings == []
 
 
+def test_xml_attribute_name_without_at_prefix_is_accepted_as_record_key(tmp_path) -> None:
+    record_a = XmlRecord(
+        index=1,
+        element=XmlElement(
+            tag="record",
+            attributes=(("id", "007"),),
+            text=None,
+            children=(XmlElement("value", (), "old", (), None),),
+            tail=None,
+        ),
+    )
+    record_b = XmlRecord(
+        index=1,
+        element=XmlElement(
+            tag="record",
+            attributes=(("id", "007"),),
+            text=None,
+            children=(XmlElement("value", (), "new", (), None),),
+            tail=None,
+        ),
+    )
+    config = ComparisonConfig(record_key=["id"])
+
+    with DuckDBStore(tmp_path / "xml-key.duckdb") as store:
+        RecordComparator().compare(store, [record_a], [record_b], config=config)
+        record_findings = list(store.iter_differences())
+
+    with DuckDBStore(tmp_path / "xml-field-key.duckdb") as store:
+        FieldComparator().compare(store, [record_a], [record_b], config=config)
+        field_findings = list(store.iter_differences(comparison_type=ComparisonType.FIELD))
+
+    assert len(record_findings) == 1
+    assert record_findings[0].comparison_type is ComparisonType.UPDATE
+    assert field_findings
+
+
 def test_per_field_null_and_numeric_tolerance_overrides(tmp_path) -> None:
     config = ComparisonConfig(
         record_key=["id"],

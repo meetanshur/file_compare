@@ -381,7 +381,11 @@ class ComparisonAgent:
             )
 
         finding_count = store.count_differences()
-        summary = _summary(store, finding_count)
+        summary = _summary(
+            store,
+            finding_count,
+            records_selected=compare_config.levels.records,
+        )
         finding_page = self.read_findings(
             store,
             limit=self.config.max_explanation_findings,
@@ -925,12 +929,18 @@ def _trim_samples_to_limit(
             break
 
 
-def _summary(store: DuckDBStore, total: int) -> dict[str, int | bool]:
+def _summary(
+    store: DuckDBStore,
+    total: int,
+    *,
+    records_selected: bool,
+) -> dict[str, int | bool]:
     return {
         "total_findings": total,
         "raw": store.count_differences(ComparisonType.RAW),
         "metadata": store.count_differences(ComparisonType.METADATA),
         "schema": store.count_differences(ComparisonType.SCHEMA),
+        "records_selected": records_selected,
         "inserted": store.count_differences(ComparisonType.INSERT),
         "updated": store.count_differences(ComparisonType.UPDATE),
         "deleted": store.count_differences(ComparisonType.DELETE),

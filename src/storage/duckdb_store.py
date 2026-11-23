@@ -70,6 +70,13 @@ def _serialize_json(value: Any) -> str:
     )
 
 
+def _resolve_record_key(record: Mapping[str, Any], field: str) -> str | None:
+    if field in record:
+        return field
+    attribute_field = field if field.startswith("@") else f"@{field}"
+    return attribute_field if attribute_field in record else None
+
+
 class DuckDBStore:
     """Store streamed records and findings in a job-scoped DuckDB database."""
 
@@ -264,7 +271,9 @@ class DuckDBStore:
                 for record in records:
                     if cancellation_check is not None:
                         cancellation_check()
-                    missing_keys = [field for field in key_fields if field not in record]
+                    missing_keys = [
+                        field for field in key_fields if _resolve_record_key(record, field) is None
+                    ]
                     if missing_keys:
                         raise ValueError(f"Record is missing key fields: {', '.join(missing_keys)}")
                     key = None
@@ -272,7 +281,12 @@ class DuckDBStore:
                     if key_fields:
                         key = []
                         for field in key_fields:
-                            value = record[field]
+                            resolved_field = _resolve_record_key(record, field)
+                            if resolved_field is None:
+                                raise ValueError(
+                                    f"Record is missing key fields: {', '.join(key_fields)}"
+                                )
+                            value = record[resolved_field]
                             if trim_keys or not key_case_sensitive:
                                 value = str(value)
                                 if trim_keys:
@@ -355,12 +369,19 @@ class DuckDBStore:
                     fields = getattr(record, "fields", None)
                     if not isinstance(fields, Mapping):
                         raise TypeError("Field records must expose a fields mapping")
-                    missing_keys = [field for field in key_fields if field not in fields]
+                    missing_keys = [
+                        field for field in key_fields if _resolve_record_key(fields, field) is None
+                    ]
                     if missing_keys:
                         raise ValueError(f"Record is missing key fields: {', '.join(missing_keys)}")
                     key: list[list[str]] = []
                     for field in key_fields:
-                        typed_value = fields[field]
+                        resolved_field = _resolve_record_key(fields, field)
+                        if resolved_field is None:
+                            raise ValueError(
+                                f"Record is missing key fields: {', '.join(key_fields)}"
+                            )
+                        typed_value = fields[resolved_field]
                         value = str(typed_value.value)
                         if trim_keys:
                             value = value.strip()

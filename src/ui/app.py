@@ -7,7 +7,6 @@ import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import TextIO
 from uuid import UUID
 
 import streamlit as st
@@ -29,6 +28,15 @@ from reports.exports import iter_findings_csv, iter_findings_jsonl
 from storage.duckdb_store import DuckDBStore
 
 _PAGE_SIZE = 50
+_COMPARISON_LEVEL_OPTIONS = (
+    "Raw bytes",
+    "Metadata",
+    "XML structure",
+    "Records",
+    "Fields",
+    "Financial",
+    "Reconciliation",
+)
 
 
 class _UnavailableProvider:
@@ -103,34 +111,38 @@ def _database_path(job_id: UUID) -> Path:
     return _runner().database_directory / f"{job_id}.duckdb"
 
 
+def _record_summary_value(summary: dict[str, int | bool], key: str) -> int | str:
+    return summary.get(key, 0) if summary.get("records_selected", False) else "not run"
+
+
 def _export_data(
     job_id: UUID,
     export_format: str,
     explanation_label: str | None,
-) -> TextIO:
-    output = tempfile.SpooledTemporaryFile(
+) -> str:
+    with tempfile.SpooledTemporaryFile(
         max_size=1024 * 1024,
         mode="w+t",
         encoding="utf-8",
         newline="",
-    )
-    with DuckDBStore(_database_path(job_id)) as store:
-        rows = (
-            iter_findings_csv(store, explanation_label=explanation_label)
-            if export_format == "csv"
-            else iter_findings_jsonl(store, explanation_label=explanation_label)
-        )
-        for row in rows:
-            output.write(row)
-    output.seek(0)
-    return output
+    ) as output:
+        with DuckDBStore(_database_path(job_id)) as store:
+            rows = (
+                iter_findings_csv(store, explanation_label=explanation_label)
+                if export_format == "csv"
+                else iter_findings_jsonl(store, explanation_label=explanation_label)
+            )
+            for row in rows:
+                output.write(row)
+        output.seek(0)
+        return output.read()
 
 
 def _export_callable(
     job_id: UUID,
     export_format: str,
     explanation_label: str | None,
-) -> Callable[[], TextIO]:
+) -> Callable[[], str]:
     return lambda: _export_data(job_id, export_format, explanation_label)
 
 
@@ -147,9 +159,9 @@ def _render_results(job_id: UUID, snapshot) -> None:
     st.subheader("Summary")
     columns = st.columns(4)
     columns[0].metric("Findings", result.summary.get("total_findings", 0))
-    columns[1].metric("Inserted", result.summary.get("inserted", 0))
-    columns[2].metric("Updated", result.summary.get("updated", 0))
-    columns[3].metric("Deleted", result.summary.get("deleted", 0))
+    columns[1].metric("Inserted", _record_summary_value(result.summary, "inserted"))
+    columns[2].metric("Updated", _record_summary_value(result.summary, "updated"))
+    columns[3].metric("Deleted", _record_summary_value(result.summary, "deleted"))
     if result.truncated:
         st.warning("Comparison was truncated at the configured finding limit.")
 
@@ -248,15 +260,7 @@ def main() -> None:
         source_b_uri = st.text_input("File B path or S3 URI")
         selected_levels = st.multiselect(
             "Comparison levels",
-            [
-                "Raw bytes",
-                "Metadata",
-                "XML structure",
-                "Records",
-                "Fields",
-                "Financial",
-                "Reconciliation",
-            ],
+            list(_COMPARISON_LEVEL_OPTIONS),
             default=["Raw bytes", "Metadata", "XML structure"],
         )
         preset = st.selectbox("Comparison preset", ["strict", "lenient"])
