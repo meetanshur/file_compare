@@ -143,6 +143,22 @@ temporary disk files.
 Findings are streamed, so callers should persist or consume them incrementally
 rather than collecting unbounded results.
 
+## XML schema comparison
+
+`XMLSchemaComparator` consumes the XML parser's record streams in order and
+reports element names (including expanded namespace URIs), child hierarchy
+and order, attribute-name presence, and missing records/children. It does not
+compare element text or attribute values; those are data-level concerns. It
+keeps at most one pair of records and an explicit traversal stack in memory.
+Pass `max_total_differences` to bound emitted findings and
+`cancellation_check` to cooperatively cancel a job.
+
+When an XSD is supplied, `validate_xml_schema` validates the source with
+lxml's incremental `iterparse` schema validation. External entity resolution,
+network access, and DTD loading are disabled. The XSD itself is parsed with
+the same restrictions. Malformed or invalid XML raises `XMLSchemaError`
+including the source and schema names.
+
 On Windows with Python 3.13, a three-run comparison of the generated
 `xml_100MB_A.xml` and `xml_100MB_B.xml` fixtures (100,000,000 bytes each)
 verified both fixture hashes and the expected changed-record values in the

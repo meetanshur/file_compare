@@ -7,6 +7,7 @@ from comparators.raw import (
     RawDifference,
     RawDifferenceKind,
 )
+from comparators.xml_schema import XMLSchemaComparator, XMLSchemaError, validate_xml_schema
 
 __all__ = [
     "RawComparator",
@@ -14,4 +15,7 @@ __all__ = [
     "RawComparisonStatus",
     "RawDifference",
     "RawDifferenceKind",
+    "XMLSchemaComparator",
+    "XMLSchemaError",
+    "validate_xml_schema",
 ]
