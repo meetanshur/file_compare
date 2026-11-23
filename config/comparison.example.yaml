@@ -1,0 +1,16 @@
+levels:
+  raw: true
+  schema: true
+  metadata: true
+  records: true
+  fields: true
+  financial: true
+  reconciliation: true
+record_key:
+  - id
+ignore_fields:
+  - updated_at
+numeric_tolerance: "0.00"
+case_sensitive: true
+whitespace: preserve
+strictness: strict
