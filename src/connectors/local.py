@@ -27,11 +27,18 @@ class LocalFileConnector(SourceConnector):
             raise ValueError(f"Not a local file path or file URI: {uri}")
 
         path = self._path_from_uri(uri)
-        stat = path.stat()
-        if not path.is_file():
-            raise IsADirectoryError(f"Source is not a regular file: {path}")
+        try:
+            stat = path.stat()
+            if not path.is_file():
+                raise IsADirectoryError(f"Source is not a regular file: {path}")
+            stream = path.open("rb")
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(f"Source file does not exist: {path}") from exc
+        except IsADirectoryError as exc:
+            raise IsADirectoryError(f"Source is not a regular file: {path}") from exc
+        except PermissionError as exc:
+            raise PermissionError(f"Permission denied opening source file: {path}") from exc
 
-        stream = path.open("rb")
         try:
             metadata = SourceMetadata(
                 uri=path.as_uri(),
