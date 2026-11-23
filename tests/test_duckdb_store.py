@@ -80,6 +80,28 @@ def test_native_csv_ingestion_uses_duckdb_and_persists_keys(tmp_path) -> None:
     assert records[1].payload == {"id": "2", "value": ""}
 
 
+def test_native_csv_ingestion_preserves_field_text_and_quoted_values(tmp_path) -> None:
+    csv_path = tmp_path / "exact-values.csv"
+    csv_path.write_text(
+        'id,amount,trailing,quoted\n007,1.10,"tail   ","hello, ""world"""\n',
+        encoding="utf-8",
+        newline="",
+    )
+
+    with DuckDBStore(tmp_path / "exact-values.duckdb") as store:
+        inserted = store.insert_csv_file(RecordSide.FILE_A, csv_path, key_fields=["id"])
+        records = list(store.iter_records(RecordSide.FILE_A))
+
+    assert inserted == 1
+    assert records[0].record_key == [["id", "007"]]
+    assert records[0].payload == {
+        "id": "007",
+        "amount": "1.10",
+        "trailing": "tail   ",
+        "quoted": 'hello, "world"',
+    }
+
+
 def test_duckdb_uses_configured_memory_limit_and_temp_directory(tmp_path) -> None:
     temp_directory = tmp_path / "duckdb-spill"
     with DuckDBStore(
