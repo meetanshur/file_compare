@@ -217,6 +217,8 @@ class ComparisonJobRunner:
                 database_path,
                 job_id=state.job_id,
                 max_memory_mb=duckdb_memory_mb,
+                duckdb_threads=state.config.duckdb_threads,
+                cleanup_temp_directory=True,
                 max_total_differences=state.config.max_total_differences,
             ) as store:
                 context = ComparisonJobContext(
@@ -239,9 +241,14 @@ class ComparisonJobRunner:
                 state.finished_at = datetime.now(UTC)
         except Exception as exc:
             logger.exception("Comparison job %s failed", state.job_id)
+            user_error = str(exc) or type(exc).__name__
+            cause = exc.__cause__
+            if cause is not None:
+                cause_message = str(cause) or type(cause).__name__
+                user_error = f"{user_error} (caused by: {cause_message})"
             with self._lock:
                 state.status = JobStatus.FAILED
-                state.error = str(exc) or type(exc).__name__
+                state.error = user_error
                 state.finished_at = datetime.now(UTC)
 
     def _update_progress(

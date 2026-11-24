@@ -254,9 +254,6 @@ def run_benchmark(
                 }
             )
 
-        index_started = time.perf_counter()
-        store.create_record_key_index()
-        index_seconds = time.perf_counter() - index_started
         stored_counts = {
             "file_a": store.count_records(RecordSide.FILE_A),
             "file_b": store.count_records(RecordSide.FILE_B),
@@ -288,7 +285,6 @@ def run_benchmark(
         },
         "database": str(database_path),
         "free_disk_bytes_before": free_disk_bytes_before,
-        "index_creation_seconds": index_seconds,
         "files": measurements,
         "validation": {
             "hashes_match_manifest": all(item["sha256_valid"] for item in measurements),

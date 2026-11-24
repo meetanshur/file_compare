@@ -36,36 +36,6 @@ def test_records_are_persisted_with_keys_in_bounded_batches(tmp_path) -> None:
     assert records[0].payload == {"amount": "12.50", "id": 0}
 
 
-def test_record_key_index_is_created_only_when_requested(tmp_path) -> None:
-    with DuckDBStore(tmp_path / "indexed.duckdb", batch_size=2) as store:
-        store.insert_records(
-            RecordSide.FILE_A,
-            ({"id": index, "value": str(index)} for index in range(5)),
-            key_fields=["id"],
-        )
-        index_count_before = (
-            store._require_connection()
-            .execute(
-                "SELECT count(*) FROM duckdb_indexes() "
-                "WHERE index_name = 'comparison_records_key_idx'"
-            )
-            .fetchone()[0]
-        )
-
-        store.create_record_key_index()
-        index_count_after = (
-            store._require_connection()
-            .execute(
-                "SELECT count(*) FROM duckdb_indexes() "
-                "WHERE index_name = 'comparison_records_key_idx'"
-            )
-            .fetchone()[0]
-        )
-
-    assert index_count_before == 0
-    assert index_count_after == 1
-
-
 def test_native_csv_ingestion_uses_duckdb_and_persists_keys(tmp_path) -> None:
     csv_path = tmp_path / "records.csv"
     csv_path.write_text("id,value\n1,first\n2,\n", encoding="utf-8")
@@ -109,15 +79,25 @@ def test_duckdb_uses_configured_memory_limit_and_temp_directory(tmp_path) -> Non
         max_memory_mb=32,
         temp_directory=temp_directory,
     ) as store:
-        memory_limit, configured_temp_directory = (
+        memory_limit, configured_temp_directory, threads, preserve_insertion_order = (
             store._require_connection()
-            .execute("SELECT current_setting('memory_limit'), current_setting('temp_directory')")
+            .execute(
+                "SELECT current_setting('memory_limit'), current_setting('temp_directory'), "
+                "current_setting('threads'), current_setting('preserve_insertion_order')"
+            )
             .fetchone()
         )
 
     assert memory_limit == "32.0 MiB"
     assert configured_temp_directory == str(temp_directory)
+    assert threads == 4
+    assert preserve_insertion_order is False
     assert temp_directory.is_dir()
+
+
+def test_duckdb_rejects_non_positive_thread_count(tmp_path) -> None:
+    with pytest.raises(ValueError, match="duckdb_threads must be greater than zero"):
+        DuckDBStore(tmp_path / "invalid.duckdb", duckdb_threads=0)
 
 
 def test_duckdb_rejects_non_positive_memory_limit(tmp_path) -> None:

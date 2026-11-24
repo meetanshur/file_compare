@@ -63,6 +63,39 @@ def test_record_comparison_reports_insert_update_and_delete(tmp_path) -> None:
     assert update.value_b == {"id": "update", "value": "new"}
 
 
+def test_record_join_handles_hundreds_of_thousands_of_keys_under_low_memory(tmp_path) -> None:
+    record_count = 125_000
+    store = DuckDBStore(
+        tmp_path / "low-memory.duckdb",
+        batch_size=10_000,
+        max_memory_mb=128,
+        duckdb_threads=2,
+        max_total_differences=0,
+    )
+    try:
+        result = RecordComparator().compare(
+            store,
+            ({"id": str(index), "value": "same"} for index in range(record_count)),
+            ({"id": str(index), "value": "same"} for index in range(record_count)),
+            key_fields=["id"],
+        )
+        index_count = (
+            store._require_connection()
+            .execute(
+                "SELECT count(*) FROM duckdb_indexes() "
+                "WHERE index_name = 'comparison_records_key_idx'"
+            )
+            .fetchone()[0]
+        )
+    finally:
+        store.close()
+
+    assert result.records_file_a == record_count
+    assert result.records_file_b == record_count
+    assert result.differences.total_persisted == 0
+    assert index_count == 0
+
+
 def test_duplicate_in_a_only_reports_group_size_and_records(tmp_path) -> None:
     store, _ = _compare(
         tmp_path,

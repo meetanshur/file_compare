@@ -45,9 +45,9 @@ written under `.test_data/benchmark_storage/`. Use `--max-memory-mb` and
 `--batch-size` to record different settings. CSV uses DuckDB's native
 `read_csv`/insert-select path. XML uses `lxml.etree.iterparse` with processed
 elements and previous siblings cleared, then persists 50,000-row Appender
-batches by default. A record-key index is created only after both files are
-loaded. The benchmark reports the Python parser-only pass, hash time, ingestion
-time, XML parse/storage estimates, index time, and peak process memory. For
+batches by default. Record comparison uses DuckDB joins without a record-key
+ART index. The benchmark reports the Python parser-only pass, hash time,
+ingestion time, XML parse/storage estimates, and peak process memory. For
 CSV, native parsing and insertion occur together inside DuckDB and are reported
 as one time. This step benchmarks parsing and storage only;
 `difference_comparison_performed` is false because record comparison joins

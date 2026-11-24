@@ -27,7 +27,6 @@ def test_benchmark_streams_records_and_validates_manifest(tmp_path, file_format)
     assert report["benchmark_scope"].startswith("streaming parse and DuckDB record ingestion")
     assert report["settings"]["max_memory_mb"] == 512
     assert report["settings"]["duckdb_memory_mb"] == 256
-    assert report["index_creation_seconds"] >= 0
     assert report["validation"]["hashes_match_manifest"] is True
     assert report["validation"]["record_counts_match_manifest"] is True
     assert report["validation"]["peak_memory_within_budget"] is True

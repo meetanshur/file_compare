@@ -73,6 +73,7 @@ metadata. Export downloads are prepared on demand using a disk-spilling buffer.
 | --- | ---: | --- |
 | `chunk_size` | 4 MiB (4,194,304 bytes) | Maximum byte block read from a source at a time. |
 | `max_memory_mb` | 512 MiB per comparison job | Working-memory budget for a job, including buffers, parsers, and DuckDB. |
+| `duckdb_threads` | 4 per comparison job | DuckDB worker threads; lower values can reduce working-memory pressure. |
 | `max_differences` | 10,000 findings in an in-memory preview | Maximum findings retained for immediate display in application memory. |
 | `max_total_differences` | 1,000,000 findings | Maximum findings persisted per job. `0` means unlimited. |
 
@@ -105,11 +106,17 @@ Temporary database files must be kept separate from source files, scoped to a
 job, and cleaned up according to job-retention policy. The database must be
 configured with a memory limit within the job budget and a temporary directory
 with enough free disk space. The job runner assigns DuckDB about 50% of
-`max_memory_mb`, leaving the remainder for parsers and buffers. Since records
-and findings are persisted in DuckDB, large comparisons can require substantial
-free disk space. If disk space is low or a database write fails, fail the job
-with a clear error; do not silently fall back to storing all records or
-findings in memory.
+`max_memory_mb`, disables insertion-order preservation, and defaults to four
+DuckDB threads, leaving the remainder for parsers and buffers. Per-job DuckDB
+spill directories are removed when jobs finish, fail, or are cancelled; the
+results database remains available for UI paging and export. With the default
+512 MiB job budget, a 1 GiB XML comparison is expected to peak around the
+configured 512 MiB process working-memory budget (including DuckDB's 256 MiB
+limit), but this is an estimate, not a measured or hard process-memory ceiling.
+Since records and findings are persisted in DuckDB, large comparisons can
+require substantial free disk space. If disk space is low or a database write
+fails, fail the job with a clear error; do not silently fall back to storing
+all records or findings in memory.
 
 ## Memory rules
 

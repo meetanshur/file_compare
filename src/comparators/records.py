@@ -76,7 +76,6 @@ class RecordComparator:
         )
         if cancellation_check is not None:
             cancellation_check()
-        store.create_record_key_index()
         differences = store.insert_differences(
             store.iter_record_comparison_differences(
                 cancellation_check=cancellation_check,

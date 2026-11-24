@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -86,7 +87,9 @@ class DuckDBStore:
         *,
         job_id: UUID | None = None,
         max_memory_mb: int = 512,
+        duckdb_threads: int = 4,
         temp_directory: str | Path | None = None,
+        cleanup_temp_directory: bool = False,
         max_total_differences: int = 1_000_000,
         batch_size: int = 50_000,
     ) -> None:
@@ -96,6 +99,8 @@ class DuckDBStore:
             raise ValueError("batch_size must be greater than zero")
         if max_memory_mb < 1:
             raise ValueError("max_memory_mb must be greater than zero")
+        if duckdb_threads < 1:
+            raise ValueError("duckdb_threads must be greater than zero")
 
         self.database_path = Path(database_path)
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -107,6 +112,8 @@ class DuckDBStore:
         self.temp_directory.mkdir(parents=True, exist_ok=True)
         self.max_total_differences = max_total_differences
         self.max_memory_mb = max_memory_mb
+        self.duckdb_threads = duckdb_threads
+        self.cleanup_temp_directory = cleanup_temp_directory
         self.batch_size = batch_size
         self._lock = threading.RLock()
         self._connection: duckdb.DuckDBPyConnection | None = None
@@ -116,6 +123,8 @@ class DuckDBStore:
                 str(self.database_path),
                 config={
                     "memory_limit": f"{max_memory_mb}MiB",
+                    "threads": str(duckdb_threads),
+                    "preserve_insertion_order": "false",
                     "temp_directory": str(self.temp_directory),
                 },
             )
@@ -131,12 +140,27 @@ class DuckDBStore:
             self._truncated = self._get_metadata("truncated") == "true"
         except (duckdb.Error, OSError) as exc:
             self._close_after_initialization_failure()
+            if self.cleanup_temp_directory:
+                try:
+                    shutil.rmtree(self.temp_directory)
+                except FileNotFoundError:
+                    pass
+                except OSError as cleanup_exc:
+                    raise StorageError(
+                        f"Could not initialize DuckDB storage or clean up its temporary "
+                        f"directory: {cleanup_exc}"
+                    ) from exc
             raise StorageError(
                 "Could not initialize DuckDB storage; check database and temporary-directory "
                 "permissions and free disk space."
             ) from exc
         except ValueError:
             self._close_after_initialization_failure()
+            if self.cleanup_temp_directory:
+                try:
+                    shutil.rmtree(self.temp_directory)
+                except FileNotFoundError:
+                    pass
             raise
 
     def _initialize_schema(self) -> None:
@@ -1113,19 +1137,6 @@ class DuckDBStore:
                     "permissions, and available disk space."
                 ) from exc
 
-    def create_record_key_index(self) -> None:
-        """Create the record matching index after records have been loaded."""
-        with self._lock:
-            try:
-                self._require_connection().execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS comparison_records_key_idx
-                    ON comparison_records (side, record_key_text)
-                    """
-                )
-            except duckdb.Error as exc:
-                raise StorageError("Could not create the record-key index.") from exc
-
     def count_records(self, side: RecordSide | None = None) -> int:
         """Return the number of records stored, optionally for one input side."""
         with self._lock:
@@ -1345,15 +1356,25 @@ class DuckDBStore:
                 raise StorageError("Could not read stored findings.") from exc
 
     def close(self) -> None:
-        """Close the database connection."""
+        """Close the connection and optionally remove this job's DuckDB spill directory."""
         with self._lock:
+            close_error: duckdb.Error | None = None
             if self._connection is not None:
                 try:
                     self._connection.close()
                 except duckdb.Error as exc:
-                    raise StorageError("Could not close DuckDB storage cleanly.") from exc
+                    close_error = exc
                 finally:
                     self._connection = None
+            if self.cleanup_temp_directory:
+                try:
+                    shutil.rmtree(self.temp_directory)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    raise StorageError("Could not remove the DuckDB temporary directory.") from exc
+            if close_error is not None:
+                raise StorageError("Could not close DuckDB storage cleanly.") from close_error
 
     def __enter__(self) -> DuckDBStore:
         return self
